@@ -6,7 +6,7 @@
 
 import { buildSheet, canCleanUp } from './cleanup.js';
 
-const VERSION = '1.6.0';
+const VERSION = '1.7.0';
 const MODULE = 'scene_backdrop';
 const SWIPES_KEY = `${MODULE}_swipes`;
 
@@ -48,6 +48,23 @@ function settings() {
     if ('position' in s) {
         delete s.position; // replaced by "anchor", which adds "auto"
         s.anchor = 'auto';
+    }
+    if (!s.grouped) {
+        // Older setups: a label with conditions whose name contains a plain
+        // label's name ("Kemono Handjob") becomes a variant in that group.
+        for (const sl of s.slots) {
+            if (sl.group) continue;
+            const parent = legacyParent(sl, s.slots);
+            sl.group = parent ? parent.label.trim() : sl.label.trim();
+        }
+        for (const name of new Set(s.slots.map(groupName))) {
+            const list = s.slots.filter(sl => groupName(sl) === name);
+            if (!list.some(sl => sl.isDefault)) {
+                const plain = list.find(sl => !hasConditions(sl));
+                if (plain) plain.isDefault = true;
+            }
+        }
+        s.grouped = 1;
     }
     return s;
 }
@@ -249,6 +266,7 @@ function describedMatch(text, effects, sources) {
 // confirm: the AI should check the trait is true right now (a word match can
 // be backstory, another form, or something that has since changed).
 function conditionsOf(slot, upto) {
+    if (slot.isDefault) return { met: true, conditional: false, confirm: false, notes: [], why: '' };
     const people = splitList(slot.onlyWith);
     const needs = splitList(slot.needsEffect);
     if (!people.length && !needs.length) return { met: true, conditional: false, confirm: false, notes: [], why: '' };
@@ -303,30 +321,39 @@ function conditionsOf(slot, upto) {
     return { met, conditional: true, confirm: met && confirm, notes: met ? notes : [], why: reasons.join(' · ') };
 }
 
+// ---------- groups ----------
+// Images sharing a Group are variants of the same action. The default
+// variant is used whenever no other variant applies.
+
+function groupName(slot) {
+    return String(slot.group ?? '').trim() || String(slot.label ?? '').trim();
+}
+
+function defaultOf(name, slots = settings().slots) {
+    return slots.find(sl => groupName(sl) === name && sl.isDefault) ?? null;
+}
+
+function legacyParent(slot, slots) {
+    if (!hasConditions(slot)) return null;
+    const name = String(slot.label ?? '').trim().toLowerCase();
+    const generals = slots.filter(sl => sl !== slot && String(sl.label ?? '').trim() && !hasConditions(sl));
+    const base = name.replace(/\s*[(\[].*[)\]]\s*$/, '').trim();
+    return generals.find(g => g.label.trim().toLowerCase() === base)
+        ?? generals.filter(g => wordAt(name, g.label.trim().toLowerCase()) >= 0).sort((a, b) => b.label.length - a.label.length)[0]
+        ?? null;
+}
+
 function hasConditions(slot) {
     return !!(splitList(slot.onlyWith).length || String(slot.needsEffect ?? '').trim());
 }
 
-// The general label a special one belongs to: "Blowjob (ears)" or
-// "Kemono Handjob" -> "Handjob" (the general label's name inside the special one's).
-function parentOf(slot) {
-    if (!hasConditions(slot)) return null;
-    const name = slot.label.trim().toLowerCase();
-    const generals = settings().slots.filter(sl => sl !== slot && sl.label.trim() && !hasConditions(sl));
-    const base = name.replace(/\s*[(\[].*[)\]]\s*$/, '').trim();
-    return generals.find(g => g.label.trim().toLowerCase() === base)
-        ?? generals
-            .filter(g => wordAt(name, g.label.trim().toLowerCase()) >= 0)
-            .sort((a, b) => b.label.length - a.label.length)[0]
-        ?? null;
-}
-
 // When a special label isn't available, use the general one for the same
 // action: "Blowjob (ears)" falls back to "Blowjob".
-function fallbackFor(label, upto) {
+function fallbackFor(label) {
     const slot = slotByLabel(label);
-    const parent = slot ? parentOf(slot) : null;
-    return parent && parent.path ? parent : null;
+    if (!slot) return null;
+    const def = defaultOf(groupName(slot));
+    return def && def !== slot && def.path ? def : null;
 }
 
 function usableSlots(upto) {
@@ -414,20 +441,19 @@ function cleanMessage(mes) {
     return String(mes ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 2500);
 }
 
-// The AI answers two simple questions in one request: which action is
-// happening (from the general labels), and, for special versions whose
-// condition needs judging, whether that condition is true right now. The
-// extension then picks the special version itself when it applies.
+// The AI answers in one request: which group (action) is happening, and
+// which variant of it fits the character involved right now ("default" if
+// none). Only variants that are plausible in this chat are shown to it.
 function pickPlan(index) {
-    const usable = usableSlots(index);
-    const specials = [];   // { slot, parent, cond }
-    const offered = [];    // labels the AI chooses from
-    for (const sl of usable) {
-        const parent = parentOf(sl);
-        if (parent && parent.path) specials.push({ slot: sl, parent, cond: conditionsOf(sl, index) });
-        else offered.push(sl);
+    const groups = new Map();
+    for (const sl of usableSlots(index)) {
+        const name = groupName(sl);
+        if (!groups.has(name)) groups.set(name, { name, def: null, variants: [] });
+        const g = groups.get(name);
+        if (sl.isDefault) g.def = sl;
+        else g.variants.push({ slot: sl, cond: conditionsOf(sl, index) });
     }
-    return { offered, specials, ask: specials.filter(x => x.cond.confirm) };
+    return [...groups.values()];
 }
 
 function conditionText(slot) {
@@ -435,34 +461,38 @@ function conditionText(slot) {
     const parts = [];
     if (t) parts.push(isDescribed(t) ? t : splitList(t).map(x => x.replace(/\|/g, ' or ')).join(' and '));
     if (splitList(slot.onlyWith).length) parts.push(`the character involved is ${splitList(slot.onlyWith).join(' or ')}`);
-    return parts.join('; ');
+    return parts.join('; ') || 'no condition';
 }
 
 function buildPick(index, current) {
     const c = ctx();
     const s = settings();
-    const { offered, ask } = pickPlan(index);
-    const labels = offered.map(sl => {
-        const cond = conditionsOf(sl, index);
-        let tag = '';
-        if (cond.confirm) tag = ` [only if this is true right now: ${conditionText(sl)}]`;
-        return `- ${sl.label}${sl.hint ? `: ${sl.hint}` : ''}${tag}`;
+    const plan = pickPlan(index);
+    const groupLines = plan.map(g => {
+        const hint = (g.def ?? g.variants[0]?.slot)?.hint;
+        const onlyVariants = !g.def ? ' (only when one of its variants applies)' : '';
+        return `- ${g.name}${hint ? `: ${hint}` : ''}${onlyVariants}`;
     }).join('\n');
 
     const notes = new Map();
-    for (const x of ask) for (const n of x.cond.notes) if (n.text) notes.set(`${n.who}|${n.text}`, `- ${n.who}: "${n.text}"`);
-    for (const sl of offered) for (const n of conditionsOf(sl, index).notes) if (n.text) notes.set(`${n.who}|${n.text}`, `- ${n.who}: "${n.text}"`);
-
-    let specialBlock = '';
-    if (ask.length) {
-        specialBlock = `\n\nSPECIAL VERSIONS. Some labels have a special version. For each one below, decide whether its condition is true for the character involved in the current scene right now. Backstory, ancestry, or a form the character is not in right now does not count. Judge from the story${notes.size ? ' and the CHARACTER NOTES' : ''}.\n`
-            + ask.map(x => `- "${x.slot.label}" (special version of ${x.parent.label})${x.slot.hint ? ` — ${x.slot.hint}` : ''}: ${conditionText(x.slot)}`).join('\n');
+    const variantBlocks = [];
+    for (const g of plan) {
+        if (!g.variants.length) continue;
+        const lines = [];
+        if (g.def) lines.push('  - default: when none of the variants below fits');
+        for (const v of g.variants) {
+            lines.push(`  - "${v.slot.label}"${v.slot.hint ? ` (${v.slot.hint})` : ''}: ${conditionText(v.slot)}${v.cond.confirm ? '' : ' [known to be true right now]'}`);
+            for (const n of v.cond.notes) if (n.text) notes.set(`${n.who}|${n.text}`, `- ${n.who}: "${n.text}"`);
+        }
+        variantBlocks.push(`${g.name}\n${lines.join('\n')}`);
     }
+    const variantBlock = variantBlocks.length
+        ? `\n\nVARIANTS. Some groups have variants. If you pick one of these groups, also pick the variant that fits the character involved in the current scene right now; if several fit, choose the best fit for this moment. Backstory, ancestry, or a form the character is not in right now does not count.${notes.size ? ' Use the CHARACTER NOTES and the story.' : ''}\n${variantBlocks.join('\n')}`
+        : '';
     const noteBlock = notes.size ? `\n\nCHARACTER NOTES (short excerpts):\n${[...notes.values()].slice(0, 6).join('\n')}` : '';
 
-    // A special version counts as its general label for "keep the current one".
     const curSlot = current ? slotByLabel(current) : null;
-    const curName = curSlot ? (parentOf(curSlot)?.label ?? curSlot.label) : (current ?? 'none');
+    const curName = curSlot ? groupName(curSlot) : (current ?? 'none');
 
     const start = Math.max(0, index - s.contextMessages + 1);
     const lines = [];
@@ -472,19 +502,16 @@ function buildPick(index, current) {
         lines.push(`${m.name}: ${cleanMessage(m.mes)}`);
     }
     const noneRule = s.allowNone
-        ? 'If none of them is happening at all, answer "none".'
+        ? 'If none of them is happening at all, answer "none" as the group.'
         : 'Always pick one of them, the closest match, even if the fit is loose. Never answer "none".';
-    const answer = ask.length
-        ? `{"label": "<one label from LABELS exactly as written>", "special": {${ask.map(x => `"${x.slot.label}": true or false`).join(', ')}}}`
-        : '{"label": "<one label from LABELS exactly as written>"}';
     const system = `You label scenes in an adult roleplay so a matching background image can be shown. You never write story text.
-Pick the label that best matches what is physically happening in the newest message.
+Pick the group that best matches what is physically happening in the newest message.
 ${noneRule}
-The current label is "${curName}". Keep it unless a different label clearly fits the newest message better.
-Answer with JSON only: ${answer}
+The current group is "${curName}". Keep it unless a different group clearly fits the newest message better.
+Answer with JSON only: {"group": "<one group exactly as written>", "variant": "<variant name exactly as written, or default>"}
 
-LABELS:
-${labels}${specialBlock}${noteBlock}`;
+GROUPS:
+${groupLines}${variantBlock}${noteBlock}`;
     const user = `RECENT STORY (oldest first, the last message is the one to label):\n\n${lines.join('\n\n')}\n\nAnswer with the JSON now.`;
     return { system, user };
 }
@@ -497,24 +524,45 @@ async function askModel({ system, user }) {
     return await c.generateRaw({ systemPrompt: system, prompt: user });
 }
 
-function parseAnswer(raw, index) {
+function parseAnswer(raw) {
     const t = String(raw ?? '').replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/```(?:json)?/gi, '');
     const a = t.indexOf('{');
     const b = t.lastIndexOf('}');
     if (a >= 0 && b > a) {
         try {
-            const parsed = JSON.parse(t.slice(a, b + 1));
-            if (typeof parsed?.label === 'string') {
-                const special = {};
-                for (const [k, v] of Object.entries(parsed.special ?? {})) special[k.trim().toLowerCase()] = v === true || v === 'true' || v === 'yes';
-                return { label: parsed.label.trim(), special };
-            }
+            const p = JSON.parse(t.slice(a, b + 1));
+            const group = typeof p?.group === 'string' ? p.group.trim() : typeof p?.label === 'string' ? p.label.trim() : '';
+            const variant = typeof p?.variant === 'string' ? p.variant.trim() : '';
+            if (group || variant) return { group, variant, text: t };
         } catch { /* fall through */ }
     }
-    // Plain answer: look for a known label in the text.
-    const lower = t.toLowerCase();
-    const hit = usableSlots(index).sort((x, y) => y.label.length - x.label.length).find(sl => lower.includes(sl.label.trim().toLowerCase()));
-    return hit ? { label: hit.label, special: {} } : null;
+    return { group: '', variant: '', text: t };
+}
+
+// Turns the AI's answer into one image, using the plan for this message.
+function decide(answer, plan) {
+    const low = x => String(x ?? '').trim().toLowerCase();
+    let g = plan.find(x => low(x.name) === low(answer.group));
+    // It may have answered with a variant or label name instead of a group.
+    const named = [answer.variant, answer.group].map(low).filter(Boolean);
+    if (!g) g = plan.find(x => x.variants.some(v => named.includes(low(v.slot.label))) || (x.def && named.includes(low(x.def.label))));
+    if (!g) {
+        // Plain-text answer: look for a group or variant name in it.
+        const text = low(answer.text);
+        const byLen = (a, b) => b.length - a.length;
+        const name = [...plan.flatMap(x => x.variants.map(v => v.slot.label)), ...plan.map(x => x.name)].sort(byLen).find(n => text.includes(low(n)));
+        if (name) {
+            g = plan.find(x => low(x.name) === low(name) || x.variants.some(v => low(v.slot.label) === low(name)));
+            if (g && !answer.variant) answer = { ...answer, variant: name };
+        }
+    }
+    if (!g) return undefined; // keep the current image
+    const picked = g.variants.find(v => low(v.slot.label) === low(answer.variant) || low(v.slot.label) === low(answer.group));
+    if (picked) return picked.slot;
+    // No variant named: a variant whose condition is certain still applies.
+    const certain = g.variants.find(v => !v.cond.confirm);
+    if (certain) return certain.slot;
+    return g.def ?? undefined;
 }
 
 async function runPick(index, manual = false) {
@@ -534,24 +582,13 @@ async function runPick(index, manual = false) {
         const current = sceneBefore(index);
         const raw = await askModel(buildPick(index, current));
         if (chatKey() !== key || ctx().chat?.[index] !== msg) return;
-        const answer = parseAnswer(raw, index);
-        let label = answer?.label ?? null;
-        if (label && label.toLowerCase() === 'none') label = s.allowNone ? 'none' : current;
-        let slot = label && label !== 'none' ? slotByLabel(label) : null;
-        if (slot && !conditionsOf(slot, index).met) slot = fallbackFor(slot.label, index);
-        // Upgrade to a special version of the chosen action when it applies:
-        // automatically if its condition is certain, or when the AI said it's true.
-        if (slot) {
-            const { specials } = pickPlan(index);
-            const general = parentOf(slot) ?? slot;
-            const options = specials.filter(x => x.parent === general);
-            const chosen = options.find(x => !x.cond.confirm)
-                ?? options.find(x => answer?.special?.[x.slot.label.trim().toLowerCase()] === true)
-                ?? null;
-            if (chosen) slot = chosen.slot;
-            else if (slot !== general && conditionsOf(slot, index).confirm && answer?.special?.[slot.label.trim().toLowerCase()] === false) slot = general;
+        const answer = parseAnswer(raw);
+        let result;
+        if (answer.group.toLowerCase() === 'none' && s.allowNone) result = 'none';
+        else {
+            const slot = decide(answer, pickPlan(index));
+            result = slot ? slot.label : current;
         }
-        const result = slot ? slot.label : (label === 'none' ? 'none' : current);
         await writeScene(index, result ?? null);
         if (manual) toast('info', `Scene: ${result ?? 'none'}`);
     } catch (err) {
@@ -855,14 +892,19 @@ function slotRow(sl) {
     } else if (sl.path) {
         thumb = `<div class="ssb-thumb ${settings().silhouette ? 'ssb-thumb-sil ssb-thumb-raw' : ''}" style="--img:url('${escapeHtml(encodeURI(urlOf(sl.path)))}')"></div>`;
     }
-    return `<div class="ssb-slot" data-slot="${escapeHtml(sl.id)}">
+    return `<div class="ssb-slot${sl.isDefault ? '' : ' ssb-variant'}" data-slot="${escapeHtml(sl.id)}">
         ${thumb}
         <div class="ssb-slot-fields">
-            <input class="text_pole" data-f="label" placeholder="Label" value="${escapeHtml(sl.label)}" maxlength="60">
+            <input class="text_pole" data-f="label" placeholder="Name" value="${escapeHtml(sl.label)}" maxlength="60">
+            <div class="ssb-group-row">
+                <input class="text_pole" data-f="group" list="ssb-group-names" placeholder="Group (same as name if empty)" value="${escapeHtml(sl.group ?? '')}" maxlength="60">
+                <label class="checkbox_label"><input type="checkbox" data-f="isDefault"${sl.isDefault ? ' checked' : ''}> Default</label>
+            </div>
             <input class="text_pole" data-f="hint" placeholder="Hint for the AI (optional)" value="${escapeHtml(sl.hint)}" maxlength="200">
-            <input class="text_pole" data-f="onlyWith" placeholder="Only with characters (optional, e.g. Mira, Kit)" value="${escapeHtml(sl.onlyWith ?? '')}" maxlength="200">
-            <input class="text_pole" data-f="needsEffect" placeholder="Needs trait or effect (optional: keywords like fox ears|kitsune, or describe it)" value="${escapeHtml(sl.needsEffect ?? '')}" maxlength="200">
-            <label class="checkbox_label ssb-confirm"><input type="checkbox" data-f="aiConfirm"${sl.aiConfirm === false ? '' : ' checked'}> AI confirms traits found on cards (backstory and other forms don't count)</label>
+            ${sl.isDefault ? '<small class="ssb-cond-note">Default: used whenever no other variant in its group applies.</small>' : ''}
+            <input class="text_pole${sl.isDefault ? ' ssb-hidden' : ''}" data-f="onlyWith" placeholder="Only with characters (optional, e.g. Mira, Kit)" value="${escapeHtml(sl.onlyWith ?? '')}" maxlength="200">
+            <input class="text_pole${sl.isDefault ? ' ssb-hidden' : ''}" data-f="needsEffect" placeholder="Needs trait or effect (optional: keywords like fox ears|kitsune, or describe it)" value="${escapeHtml(sl.needsEffect ?? '')}" maxlength="200">
+            <label class="checkbox_label ssb-confirm${sl.isDefault ? ' ssb-hidden' : ''}"><input type="checkbox" data-f="aiConfirm"${sl.aiConfirm === false ? '' : ' checked'}> AI confirms traits found on cards (backstory and other forms don't count)</label>
             <small class="ssb-cond"></small>
             <div class="ssb-slot-buttons">
                 <label class="menu_button ssb-file">Image<input type="file" accept="image/gif,image/png,image/webp,image/apng,image/avif,image/jpeg" hidden></label>
@@ -879,7 +921,26 @@ function slotRow(sl) {
 function renderSlots() {
     const box = document.getElementById('ssb-slots');
     if (!box) return;
-    box.innerHTML = settings().slots.map(slotRow).join('');
+    const groups = new Map();
+    for (const sl of settings().slots) {
+        const name = groupName(sl) || 'New';
+        if (!groups.has(name)) groups.set(name, []);
+        groups.get(name).push(sl);
+    }
+    const names = [...groups.keys()];
+    box.innerHTML = `<datalist id="ssb-group-names">${names.map(n => `<option value="${escapeHtml(n)}"></option>`).join('')}</datalist>`
+        + [...groups].map(([name, list]) => {
+            list.sort((a, b) => (b.isDefault ? 1 : 0) - (a.isDefault ? 1 : 0));
+            const variants = list.length - (list.some(x => x.isDefault) ? 1 : 0);
+            return `<div class="ssb-group">
+                <div class="ssb-group-head">
+                    <b>${escapeHtml(name)}</b>
+                    <small>${list.some(x => x.isDefault) ? 'default' : 'no default'}${variants ? ` · ${variants} variant${variants === 1 ? '' : 's'}` : ''}</small>
+                    <button type="button" class="menu_button" data-a="add-variant" data-group="${escapeHtml(name)}">+ Variant</button>
+                </div>
+                ${list.map(slotRow).join('')}
+            </div>`;
+        }).join('');
     renderConditions();
 }
 
@@ -951,11 +1012,10 @@ function buildSettings() {
                 <label>Messages the pick reads <input class="text_pole" type="number" min="1" max="12" data-k="contextMessages"></label>
                 <hr>
                 <b>Images</b>
-                <small>Each label needs an image. GIFs with a transparent background work best as silhouettes; a GIF with a solid background turns into a solid block.</small>
-                <small>Conditions are optional. A label with conditions is only used while they're true, and is preferred over a general label for the same action. <b>Only with</b>: any of these characters is in the chat or named in recent messages. <b>Needs trait or effect</b>: either a plain description (like "any animal ears: cat, fox, dog"), which the AI judges, or a keyword list where every item must be true, either as a trait (named on a character card, its tags, your persona or the recent messages, like "kitsune") or as an active SillyStatus effect (by name or icon; add &gt;=N for a minimum stage). Use | for either-or.</small>
+                <small>Images in the same <b>group</b> are variants of one action. The AI picks the group, then the variant that fits right now; the <b>Default</b> is used when no variant applies. Variants can have conditions: <b>Only with</b> (character names) and <b>Needs trait or effect</b> (a plain description, keywords like fox ears|kitsune, or a SillyStatus effect like Hypnosis&gt;=4). Use GIFs with a transparent background.</small>
                 <div id="ssb-slots"></div>
                 <div class="ssb-row">
-                    <button type="button" class="menu_button" id="ssb-add">Add label</button>
+                    <button type="button" class="menu_button" id="ssb-add">Add group</button>
                     <button type="button" class="menu_button" id="ssb-stop">Stop preview</button>
                     <button type="button" class="menu_button" id="ssb-diagnose">Diagnose</button>
                 </div>
@@ -1007,7 +1067,7 @@ function buildSettings() {
     });
     wrap.querySelector('#ssb-add').addEventListener('click', () => {
         const n = s.slots.reduce((m, sl) => Math.max(m, Number(sl.id.slice(1)) || 0), 0) + 1;
-        s.slots.push({ id: `s${n}`, label: '', hint: '', path: '' });
+        s.slots.push({ id: `s${n}`, label: '', group: '', hint: '', path: '', onlyWith: '', needsEffect: '', isDefault: true });
         save();
         renderSlots();
     });
@@ -1051,6 +1111,26 @@ function buildSettings() {
             renderStatus();
             return;
         }
+        if (f === 'isDefault') {
+            const on = event.target.checked;
+            if (on) for (const other of s.slots) if (other !== slot && groupName(other) === groupName(slot)) other.isDefault = false;
+            slot.isDefault = on;
+            save();
+            renderSlots();
+            shownSlot = null;
+            refresh();
+            return;
+        }
+        if (f === 'group' || f === 'label') {
+            const oldGroup = groupName(slot);
+            slot[f] = event.target.value.trim();
+            // A default that moved to a group that already has one stops being default there.
+            if (slot.isDefault && groupName(slot) !== oldGroup && s.slots.some(o => o !== slot && o.isDefault && groupName(o) === groupName(slot))) slot.isDefault = false;
+            save();
+            renderSlots();
+            renderStatus();
+            return;
+        }
         if (f) {
             slot[f] = event.target.value.trim();
             save();
@@ -1060,6 +1140,14 @@ function buildSettings() {
     slots.addEventListener('click', async (event) => {
         const btn = event.target.closest('button[data-a]');
         if (!btn) return;
+        if (btn.dataset.a === 'add-variant') {
+            const n = s.slots.reduce((m, sl) => Math.max(m, Number(sl.id.slice(1)) || 0), 0) + 1;
+            const group = btn.dataset.group;
+            s.slots.push({ id: `s${n}`, label: `${group} variant`, group, hint: '', path: '', onlyWith: '', needsEffect: '', isDefault: false });
+            save();
+            renderSlots();
+            return;
+        }
         const row = btn.closest('.ssb-slot');
         const slot = s.slots.find(sl => sl.id === row?.dataset.slot);
         if (!slot) return;
@@ -1145,6 +1233,9 @@ async function diagnose() {
         lines.push(`${sl.label}: ${url} → ${await loadImage(url)}${sl.sheet ? ` · cleaned ${sl.sheet.n} frames ${sl.sheet.fw}x${sl.sheet.fh}, sheet ${await loadImage(urlOf(sl.sheet.path))}` : ' · not cleaned'}`);
     }
     if (!s.slots.some(x => x.path)) lines.push('no images uploaded yet');
+    for (const g of pickPlan()) {
+        lines.push(`group ${g.name}: default ${g.def?.label ?? 'none'}${g.variants.length ? `; variants available now: ${g.variants.map(v => `${v.slot.label}${v.cond.confirm ? ' (AI confirms)' : ' (certain)'}`).join(', ')}` : ''}`);
+    }
     const effects = activeEffects();
     lines.push(`SillyStatus: ${effects ? `${effects.length} active effect(s)${effects.length ? ': ' + effects.map(e => `${e.icon ?? ''}${e.name} ${e.stage}/${e.max}`).join(', ') : ''}` : 'not found'}`);
     for (const sl of s.slots) {

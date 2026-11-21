@@ -39,8 +39,12 @@ Labels whose conditions aren't met are hidden from the AI. Labels whose conditio
 
 **AI confirms traits** (on by default, per label): a trait found as a word could be backstory ("her grandmother was a kitsune"), a form the character isn't in right now, or something that has changed since. With this on, the AI checks it as part of its normal pick, so there's no extra request. When the trait came from a card or your persona, only a short snippet around the word is sent along. Traits satisfied by a SillyStatus effect don't need confirming. Turn it off for labels whose traits are always literally true, to keep picks as small as possible.
 
-### Special versions and plain-language conditions
+### Groups and variants
 
-A label with conditions whose name contains a general label's name is treated as that label's special version: `Kemono Handjob` and `Handjob (ears)` are special versions of `Handjob`. The AI picks the action from the general labels, and the extension switches to the special version itself when it applies. That happens automatically when the condition is certain (a SillyStatus effect, or AI confirmation turned off), or when the AI confirms the condition is true right now.
+Images that share a **Group** are variants of the same action. Each group has one **Default** (no conditions) that's used when no variant applies, plus any number of variants with conditions, added with **+ Variant**.
+
+After each reply, the AI picks the group (which action is happening) and then the variant that fits the character involved right now, or the default. If several variants fit, it picks the best fit for the moment. To keep the request small, it only sees variants whose condition is plausible in the chat. A variant whose condition is certain (a SillyStatus effect, or AI confirmation turned off) is used even if the AI answers "default". When a variant stops applying mid-scene, the group's default takes over.
 
 The **Needs** field also takes a plain description, like `Any perky animal ears (cat, fox, dog, horse, tanuki girls, for example)`. The extension uses its notable words to check whether anyone in the scene might qualify and to find the relevant card snippets, and the AI judges the description itself.
+
+Setups from before groups existed are converted automatically: a label with conditions whose name contains another label's name (`Kemono Handjob`) becomes a variant in that group.

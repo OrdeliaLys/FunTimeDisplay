@@ -178,3 +178,58 @@
     font-size: 0.8em;
     opacity: 0.85;
 }
+
+/* groups */
+.ssb-group {
+    margin: 10px 0;
+    padding: 6px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.ssb-group-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 2px 4px 4px;
+}
+
+.ssb-group-head small {
+    opacity: 0.65;
+    flex: 1;
+}
+
+.ssb-group-head .menu_button {
+    margin: 0;
+    padding: 3px 10px;
+    min-height: 30px;
+}
+
+.ssb-group .ssb-slot.ssb-variant {
+    margin-left: 14px;
+    border-left: 2px solid rgba(181, 108, 255, 0.45);
+}
+
+.ssb-group-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.ssb-group-row .text_pole {
+    flex: 1;
+}
+
+.ssb-group-row .checkbox_label {
+    margin: 0 !important;
+    white-space: nowrap;
+}
+
+.ssb-hidden {
+    display: none !important;
+}
+
+.ssb-cond-note {
+    opacity: 0.7;
+}
