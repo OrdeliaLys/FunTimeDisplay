@@ -6,7 +6,7 @@
 
 import { buildSheet, canCleanUp } from './cleanup.js';
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const MODULE = 'scene_backdrop';
 const SWIPES_KEY = `${MODULE}_swipes`;
 
@@ -14,7 +14,7 @@ const DEFAULT_LABELS = ['Handjob', 'Tittyfuck', 'Footjob', 'Blowjob', 'Penetrati
 
 const DEFAULTS = {
     enabled: true,
-    slots: DEFAULT_LABELS.map((label, n) => ({ id: `s${n + 1}`, label, hint: '', path: '' })),
+    slots: DEFAULT_LABELS.map((label, n) => ({ id: `s${n + 1}`, label, hint: '', path: '', onlyWith: '', needsEffect: '' })),
     allowNone: false,
     contextMessages: 4,
     silhouette: true,
@@ -76,8 +76,116 @@ function chatKey() {
     return c.getCurrentChatId?.() ?? c.chatId ?? null;
 }
 
-function usableSlots() {
-    return settings().slots.filter(sl => sl.label.trim() && sl.path);
+// ---------- label conditions ----------
+// "Only with": any of the listed characters is in the chat (card or group
+// member) or named in the recent messages. "Needs effect": every listed
+// SillyStatus effect is active (by name or icon, optionally "Name>=3");
+// use | inside an item for alternatives, e.g. "Fox ears|Cat ears".
+
+function splitList(text) {
+    return String(text ?? '').split(/[,;]/).map(x => x.trim()).filter(Boolean);
+}
+
+function chatCharacterNames() {
+    const c = ctx();
+    const names = new Set();
+    if (c.groupId) {
+        const group = c.groups?.find(g => g.id == c.groupId);
+        for (const avatar of group?.members ?? []) {
+            const ch = c.characters?.find(x => x.avatar === avatar);
+            if (ch?.name) names.add(ch.name.toLowerCase());
+        }
+    } else if (c.name2) {
+        names.add(String(c.name2).toLowerCase());
+    }
+    if (c.name1) names.add(String(c.name1).toLowerCase());
+    return names;
+}
+
+function recentText(upto) {
+    const chat = ctx().chat ?? [];
+    const end = Math.min(upto ?? chat.length - 1, chat.length - 1);
+    const start = Math.max(0, end - settings().contextMessages + 1);
+    let out = '';
+    for (let i = start; i <= end; i++) if (chat[i] && !chat[i].is_system) out += ` ${cleanMessage(chat[i].mes)}`;
+    return out.toLowerCase();
+}
+
+function escapeRegex(t) {
+    return t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function activeEffects() {
+    try {
+        return globalThis.SillyStatus?.getEffects?.() ?? null;
+    } catch {
+        return null;
+    }
+}
+
+function effectMatches(item, effects) {
+    return item.split('|').map(x => x.trim()).filter(Boolean).some(alt => {
+        const m = alt.match(/^(.*?)\s*(>=|>|<=|<|=)\s*(\d+)$/);
+        const name = (m ? m[1] : alt).trim().toLowerCase();
+        const op = m?.[2];
+        const n = m ? Number(m[3]) : null;
+        return effects.some(e => {
+            if (!(e.stage > 0)) return false;
+            const hit = (e.icon && e.icon.toLowerCase() === name)
+                || (e.visual && e.visual.toLowerCase() === name)
+                || String(e.name ?? '').toLowerCase().includes(name);
+            if (!hit) return false;
+            if (!op) return true;
+            return { '>=': e.stage >= n, '>': e.stage > n, '<=': e.stage <= n, '<': e.stage < n, '=': e.stage === n }[op];
+        });
+    });
+}
+
+// { met, conditional, why } for a label at a point in the chat.
+function conditionsOf(slot, upto) {
+    const people = splitList(slot.onlyWith);
+    const needs = splitList(slot.needsEffect);
+    if (!people.length && !needs.length) return { met: true, conditional: false, why: '' };
+    const reasons = [];
+    let met = true;
+    if (people.length) {
+        const names = chatCharacterNames();
+        const text = recentText(upto);
+        const present = people.filter(p => names.has(p.toLowerCase()) || new RegExp(`\\b${escapeRegex(p.toLowerCase())}\\b`).test(text));
+        if (!present.length) {
+            met = false;
+            reasons.push(`none of ${people.join(', ')} here`);
+        } else reasons.push(`${present.join(', ')} here`);
+    }
+    if (needs.length) {
+        const effects = activeEffects();
+        if (!effects) {
+            met = false;
+            reasons.push('SillyStatus not found');
+        } else {
+            const missing = needs.filter(item => !effectMatches(item, effects));
+            if (missing.length) {
+                met = false;
+                reasons.push(`missing ${missing.join(', ')}`);
+            } else reasons.push(`${needs.join(', ')} active`);
+        }
+    }
+    return { met, conditional: true, why: reasons.join(' · ') };
+}
+
+// When a special label isn't available, use the general one for the same
+// action: "Blowjob (ears)" falls back to "Blowjob".
+function fallbackFor(label, upto) {
+    const base = String(label ?? '').replace(/\s*[(\[].*[)\]]\s*$/, '').trim().toLowerCase();
+    if (!base) return null;
+    const ok = usableSlots(upto);
+    return ok.find(sl => sl.label.trim().toLowerCase() === base)
+        ?? ok.find(sl => !conditionsOf(sl, upto).conditional && sl.label.trim().toLowerCase().startsWith(base))
+        ?? null;
+}
+
+function usableSlots(upto) {
+    return settings().slots.filter(sl => sl.label.trim() && sl.path && conditionsOf(sl, upto).met);
 }
 
 function slotByLabel(label) {
@@ -164,8 +272,11 @@ function cleanMessage(mes) {
 function buildPick(index, current) {
     const c = ctx();
     const s = settings();
-    const slots = usableSlots();
-    const labels = slots.map(sl => `- ${sl.label}${sl.hint ? `: ${sl.hint}` : ''}`).join('\n');
+    const slots = usableSlots(index);
+    const labels = slots.map(sl => {
+        const special = conditionsOf(sl, index).conditional ? ' [special version: its conditions are true right now, so prefer it over a general label for the same action]' : '';
+        return `- ${sl.label}${sl.hint ? `: ${sl.hint}` : ''}${special}`;
+    }).join('\n');
     const start = Math.max(0, index - s.contextMessages + 1);
     const lines = [];
     for (let i = start; i <= index; i++) {
@@ -179,7 +290,7 @@ function buildPick(index, current) {
     const system = `You label scenes in an adult roleplay so a matching background image can be shown. You never write story text.
 Pick the label that best matches what is physically happening in the newest message.
 ${noneRule}
-The current label is "${current ?? 'none'}". Keep it unless a different label clearly fits the newest message better.
+The current label is "${current ?? 'none'}". Keep it unless a different label clearly fits the newest message better, or a [special version] of the same action is now available.
 Answer with JSON only: {"label": "<one label exactly as written>"}
 
 LABELS:
@@ -196,7 +307,7 @@ async function askModel({ system, user }) {
     return await c.generateRaw({ systemPrompt: system, prompt: user });
 }
 
-function parseLabel(raw) {
+function parseLabel(raw, index) {
     const t = String(raw ?? '').replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/```(?:json)?/gi, '');
     const a = t.indexOf('{');
     const b = t.lastIndexOf('}');
@@ -208,14 +319,14 @@ function parseLabel(raw) {
     }
     // Plain answer: look for a known label in the text.
     const lower = t.toLowerCase();
-    const hit = usableSlots().find(sl => lower.includes(sl.label.trim().toLowerCase()));
+    const hit = usableSlots(index).sort((a, b) => b.label.length - a.label.length).find(sl => lower.includes(sl.label.trim().toLowerCase()));
     return hit ? hit.label : null;
 }
 
 async function runPick(index, manual = false) {
     const s = settings();
     if (!s.enabled || !chatOn()) return;
-    if (!usableSlots().length) {
+    if (!usableSlots(index).length) {
         if (manual) toast('info', 'Add at least one image with a label first.');
         return;
     }
@@ -229,9 +340,10 @@ async function runPick(index, manual = false) {
         const current = sceneBefore(index);
         const raw = await askModel(buildPick(index, current));
         if (chatKey() !== key || ctx().chat?.[index] !== msg) return;
-        let label = parseLabel(raw);
+        let label = parseLabel(raw, index);
         if (label && label.toLowerCase() === 'none') label = s.allowNone ? 'none' : current;
-        const slot = label && label !== 'none' ? slotByLabel(label) : null;
+        let slot = label && label !== 'none' ? slotByLabel(label) : null;
+        if (slot && !conditionsOf(slot, index).met) slot = fallbackFor(slot.label, index);
         const result = slot ? slot.label : (label === 'none' ? 'none' : current);
         await writeScene(index, result ?? null);
         if (manual) toast('info', `Scene: ${result ?? 'none'}`);
@@ -401,6 +513,7 @@ function renderBackdrop() {
     else if (s.enabled && chatOn()) {
         const label = currentScene();
         slot = label && label !== 'none' ? slotByLabel(label) : null;
+        if (slot && slot.path && !conditionsOf(slot).met) slot = fallbackFor(slot.label);
         if (slot && !slot.path) slot = null;
     }
     const h = ensureHolder();
@@ -540,6 +653,9 @@ function slotRow(sl) {
         <div class="ssb-slot-fields">
             <input class="text_pole" data-f="label" placeholder="Label" value="${escapeHtml(sl.label)}" maxlength="60">
             <input class="text_pole" data-f="hint" placeholder="Hint for the AI (optional)" value="${escapeHtml(sl.hint)}" maxlength="200">
+            <input class="text_pole" data-f="onlyWith" placeholder="Only with characters (optional, e.g. Mira, Kit)" value="${escapeHtml(sl.onlyWith ?? '')}" maxlength="200">
+            <input class="text_pole" data-f="needsEffect" placeholder="Needs status effect (optional, e.g. Fox ears|🦊, Hypnosis>=4)" value="${escapeHtml(sl.needsEffect ?? '')}" maxlength="200">
+            <small class="ssb-cond"></small>
             <div class="ssb-slot-buttons">
                 <label class="menu_button ssb-file">Image<input type="file" accept="image/gif,image/png,image/webp,image/apng,image/avif,image/jpeg" hidden></label>
                 <button type="button" class="menu_button" data-a="preview"${sl.path ? '' : ' disabled'}>Show</button>
@@ -558,7 +674,19 @@ function renderSlots() {
     box.innerHTML = settings().slots.map(slotRow).join('');
 }
 
+function renderConditions() {
+    for (const row of document.querySelectorAll('.ssb-slot')) {
+        const slot = settings().slots.find(sl => sl.id === row.dataset.slot);
+        const out = row.querySelector('.ssb-cond');
+        if (!slot || !out) continue;
+        const c = conditionsOf(slot);
+        out.textContent = c.conditional ? `${c.met ? '✓ Conditions met' : '✗ Not available now'} · ${c.why}` : '';
+        out.classList.toggle('ssb-cond-met', c.conditional && c.met);
+    }
+}
+
 function renderStatus() {
+    renderConditions();
     const el = document.getElementById('ssb-status');
     if (!el) return;
     const on = chatOn();
@@ -615,6 +743,7 @@ function buildSettings() {
                 <hr>
                 <b>Images</b>
                 <small>Each label needs an image. GIFs with a transparent background work best as silhouettes; a GIF with a solid background turns into a solid block.</small>
+                <small>Conditions are optional. A label with conditions is only used while they're true, and is preferred over a general label for the same action. <b>Only with</b>: any of these characters is in the chat or named in recent messages. <b>Needs status effect</b>: every listed SillyStatus effect is active (by name or icon; add &gt;=N for a minimum stage; use | for either-or).</small>
                 <div id="ssb-slots"></div>
                 <div class="ssb-row">
                     <button type="button" class="menu_button" id="ssb-add">Add label</button>
@@ -801,6 +930,12 @@ async function diagnose() {
         lines.push(`${sl.label}: ${url} → ${await loadImage(url)}${sl.sheet ? ` · cleaned ${sl.sheet.n} frames ${sl.sheet.fw}x${sl.sheet.fh}, sheet ${await loadImage(urlOf(sl.sheet.path))}` : ' · not cleaned'}`);
     }
     if (!s.slots.some(x => x.path)) lines.push('no images uploaded yet');
+    const effects = activeEffects();
+    lines.push(`SillyStatus: ${effects ? `${effects.length} active effect(s)${effects.length ? ': ' + effects.map(e => `${e.icon ?? ''}${e.name} ${e.stage}/${e.max}`).join(', ') : ''}` : 'not found'}`);
+    for (const sl of s.slots) {
+        const c = conditionsOf(sl);
+        if (c.conditional) lines.push(`${sl.label}: ${c.met ? 'available' : 'not available'} (${c.why})`);
+    }
     return lines.join('\n');
 }
 
@@ -839,6 +974,12 @@ function watchChat() {
         for (const f of figures) if (f.slot) f.layout();
     }).observe(chatEl);
 }
+
+let statusTimer = null;
+document.addEventListener('sillystatus:changed', () => {
+    clearTimeout(statusTimer);
+    statusTimer = setTimeout(refresh, 150);
+});
 
 function wireEvents() {
     const { eventSource, event_types: ev } = ctx();
