@@ -6,7 +6,7 @@
 
 import { buildSheet, canCleanUp } from './cleanup.js';
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 const MODULE = 'scene_backdrop';
 const SWIPES_KEY = `${MODULE}_swipes`;
 
@@ -123,13 +123,47 @@ function activeEffects() {
     }
 }
 
-function effectMatches(item, effects) {
+// Everything that describes who is in the scene: the chat's character cards
+// (description, personality, scenario, tags), your persona description and
+// the recent messages. Used for traits like "fox ears" or "kitsune".
+function traitText(upto) {
+    const c = ctx();
+    const cards = [];
+    if (c.groupId) {
+        const group = c.groups?.find(g => g.id == c.groupId);
+        for (const avatar of group?.members ?? []) {
+            const ch = c.characters?.find(x => x.avatar === avatar);
+            if (ch) cards.push(ch);
+        }
+    } else if (c.characterId !== undefined && c.characterId !== null) {
+        const ch = c.characters?.[c.characterId];
+        if (ch) cards.push(ch);
+    }
+    const parts = [];
+    for (const ch of cards) {
+        parts.push(ch.name, ch.description, ch.personality, ch.scenario, ch.data?.description, ch.data?.personality);
+        if (Array.isArray(ch.data?.tags)) parts.push(ch.data.tags.join(' '));
+        for (const id of c.tagMap?.[ch.avatar] ?? []) parts.push(c.tags?.find(t => String(t.id) === String(id))?.name);
+    }
+    parts.push(c.powerUserSettings?.persona_description);
+    parts.push(recentText(upto));
+    return parts.filter(Boolean).join(' \n ').toLowerCase();
+}
+
+function wordIn(text, word) {
+    return new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegex(word)}($|[^\\p{L}\\p{N}])`, 'u').test(text);
+}
+
+// One "Needs" item: met by an active SillyStatus effect, or (without a stage
+// comparison) by the trait appearing on a card, the persona or recent messages.
+function itemMatches(item, effects, traits) {
     return item.split('|').map(x => x.trim()).filter(Boolean).some(alt => {
         const m = alt.match(/^(.*?)\s*(>=|>|<=|<|=)\s*(\d+)$/);
         const name = (m ? m[1] : alt).trim().toLowerCase();
         const op = m?.[2];
         const n = m ? Number(m[3]) : null;
-        return effects.some(e => {
+        if (!op && traits && wordIn(traits, name)) return true;
+        return (effects ?? []).some(e => {
             if (!(e.stage > 0)) return false;
             const hit = (e.icon && e.icon.toLowerCase() === name)
                 || (e.visual && e.visual.toLowerCase() === name)
@@ -159,16 +193,12 @@ function conditionsOf(slot, upto) {
     }
     if (needs.length) {
         const effects = activeEffects();
-        if (!effects) {
+        const traits = traitText(upto);
+        const missing = needs.filter(item => !itemMatches(item, effects, traits));
+        if (missing.length) {
             met = false;
-            reasons.push('SillyStatus not found');
-        } else {
-            const missing = needs.filter(item => !effectMatches(item, effects));
-            if (missing.length) {
-                met = false;
-                reasons.push(`missing ${missing.join(', ')}`);
-            } else reasons.push(`${needs.join(', ')} active`);
-        }
+            reasons.push(`missing ${missing.join(', ')}${!effects && missing.some(x => /[<>=]\s*\d+$/.test(x)) ? ' (SillyStatus not found)' : ''}`);
+        } else reasons.push(`${needs.join(', ')} found`);
     }
     return { met, conditional: true, why: reasons.join(' · ') };
 }
@@ -654,7 +684,7 @@ function slotRow(sl) {
             <input class="text_pole" data-f="label" placeholder="Label" value="${escapeHtml(sl.label)}" maxlength="60">
             <input class="text_pole" data-f="hint" placeholder="Hint for the AI (optional)" value="${escapeHtml(sl.hint)}" maxlength="200">
             <input class="text_pole" data-f="onlyWith" placeholder="Only with characters (optional, e.g. Mira, Kit)" value="${escapeHtml(sl.onlyWith ?? '')}" maxlength="200">
-            <input class="text_pole" data-f="needsEffect" placeholder="Needs status effect (optional, e.g. Fox ears|🦊, Hypnosis>=4)" value="${escapeHtml(sl.needsEffect ?? '')}" maxlength="200">
+            <input class="text_pole" data-f="needsEffect" placeholder="Needs trait or effect (optional, e.g. fox ears|kitsune, Hypnosis>=4)" value="${escapeHtml(sl.needsEffect ?? '')}" maxlength="200">
             <small class="ssb-cond"></small>
             <div class="ssb-slot-buttons">
                 <label class="menu_button ssb-file">Image<input type="file" accept="image/gif,image/png,image/webp,image/apng,image/avif,image/jpeg" hidden></label>
@@ -672,6 +702,7 @@ function renderSlots() {
     const box = document.getElementById('ssb-slots');
     if (!box) return;
     box.innerHTML = settings().slots.map(slotRow).join('');
+    renderConditions();
 }
 
 function renderConditions() {
@@ -743,7 +774,7 @@ function buildSettings() {
                 <hr>
                 <b>Images</b>
                 <small>Each label needs an image. GIFs with a transparent background work best as silhouettes; a GIF with a solid background turns into a solid block.</small>
-                <small>Conditions are optional. A label with conditions is only used while they're true, and is preferred over a general label for the same action. <b>Only with</b>: any of these characters is in the chat or named in recent messages. <b>Needs status effect</b>: every listed SillyStatus effect is active (by name or icon; add &gt;=N for a minimum stage; use | for either-or).</small>
+                <small>Conditions are optional. A label with conditions is only used while they're true, and is preferred over a general label for the same action. <b>Only with</b>: any of these characters is in the chat or named in recent messages. <b>Needs trait or effect</b>: every listed item is true, either as a trait (named on a character card, its tags, your persona or the recent messages, like "kitsune") or as an active SillyStatus effect (by name or icon; add &gt;=N for a minimum stage). Use | for either-or.</small>
                 <div id="ssb-slots"></div>
                 <div class="ssb-row">
                     <button type="button" class="menu_button" id="ssb-add">Add label</button>
