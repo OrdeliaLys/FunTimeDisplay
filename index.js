@@ -6,7 +6,7 @@
 
 import { buildSheet, canCleanUp } from './cleanup.js';
 
-const VERSION = '1.8.1';
+const VERSION = '1.9.0';
 const MODULE = 'scene_backdrop';
 const SWIPES_KEY = `${MODULE}_swipes`;
 
@@ -686,7 +686,9 @@ class Figure {
         }
     }
 
-    // Size and place the figure inside the stage.
+    // Size and place the figure inside the stage: it fits within the chat
+    // area (Size scales it down from there) and is anchored by the sides it's
+    // cut off at, so those cuts sit against the screen edge where possible.
     layout() {
         const slot = this.slot;
         const stage = this.el.parentElement?.parentElement;
@@ -696,19 +698,46 @@ class Figure {
         const sh = stage.clientHeight;
         const sheet = s.silhouette ? slot.sheet : null;
         const aspect = sheet ? sheet.fw / sheet.fh : (slot.aspect || 0.75);
-        const h = Math.round(sh * (s.size / 100));
-        const w = Math.round(h * aspect);
+        const k = s.size / 100;
+        let h = sh * k;
+        let w = h * aspect;
+        if (w > sw * k) {
+            w = sw * k;
+            h = w / aspect;
+        }
+        w = Math.round(w);
+        h = Math.round(h);
         let anchor = s.anchor;
-        if (anchor === 'auto') anchor = sheet?.touchBottom ? 'bottom' : sheet?.touchTop && !sheet?.touchBottom ? 'top' : 'center';
+        if (anchor === 'auto') anchor = sheet?.touchBottom ? 'bottom' : sheet?.touchTop ? 'top' : 'center';
         const top = anchor === 'bottom' ? sh - h : anchor === 'top' ? 0 : Math.round((sh - h) / 2);
-        Object.assign(this.el.style, { right: 'auto', bottom: 'auto', left: `${Math.round((sw - w) / 2)}px`, top: `${top}px`, width: `${w}px`, height: `${h}px` });
+        let left = Math.round((sw - w) / 2);
+        if (s.anchor === 'auto' && sheet) {
+            if (sheet.touchLeft && !sheet.touchRight) left = 0;
+            else if (sheet.touchRight && !sheet.touchLeft) left = sw - w;
+        }
+        Object.assign(this.el.style, { right: 'auto', bottom: 'auto', left: `${left}px`, top: `${top}px`, width: `${w}px`, height: `${h}px` });
         this.w = w;
         this.h = h;
         if (sheet) {
-            const size = `${w * sheet.cols}px ${h * sheet.rows}px`;
-            this.el.style.maskSize = this.el.style.webkitMaskSize = size;
+            // Sides where the figure is cut off but not against the screen edge
+            // fade out, so neither the silhouette nor its glow ends in a hard line.
+            const fade = Math.round(Math.min(w, h) * 0.14);
+            const grads = [];
+            if (sheet.touchTop && top > 0) grads.push(`linear-gradient(to bottom, transparent, black ${fade}px)`);
+            if (sheet.touchBottom && top + h < sh) grads.push(`linear-gradient(to top, transparent, black ${fade}px)`);
+            if (sheet.touchLeft && left > 0) grads.push(`linear-gradient(to right, transparent, black ${fade}px)`);
+            if (sheet.touchRight && left + w < sw) grads.push(`linear-gradient(to left, transparent, black ${fade}px)`);
+            this.fades = grads;
+            const src = `url("${encodeURI(urlOf(sheet.path))}")`;
+            setMask(this.el, [src, ...grads].join(', '));
+            const sizes = [`${w * sheet.cols}px ${h * sheet.rows}px`, ...grads.map(() => '100% 100%')].join(', ');
+            this.el.style.maskSize = this.el.style.webkitMaskSize = sizes;
+            this.el.style.maskRepeat = this.el.style.webkitMaskRepeat = 'no-repeat';
+            this.el.style.maskComposite = grads.length ? 'intersect' : '';
+            this.el.style.webkitMaskComposite = grads.length ? 'source-in' : '';
             this.placeFrame();
         } else if (s.silhouette) {
+            this.fades = [];
             this.el.style.maskSize = this.el.style.webkitMaskSize = 'contain';
             this.el.style.maskPosition = this.el.style.webkitMaskPosition = 'center';
         } else {
@@ -722,7 +751,7 @@ class Figure {
         if (!sheet) return;
         const col = this.frame % sheet.cols;
         const row = Math.floor(this.frame / sheet.cols);
-        const pos = `${-col * this.w}px ${-row * this.h}px`;
+        const pos = [`${-col * this.w}px ${-row * this.h}px`, ...(this.fades ?? []).map(() => '0 0')].join(', ');
         this.el.style.maskPosition = this.el.style.webkitMaskPosition = pos;
     }
 
@@ -857,8 +886,8 @@ async function cleanSlot(slot, file) {
     if (!canCleanUp()) throw new Error('this browser cannot clean up animations');
     const status = document.querySelector(`.ssb-slot[data-slot="${slot.id}"] .ssb-progress`);
     const { blob, meta } = await buildSheet(file, (k, n) => {
-        if (status) status.textContent = `Cleaning up… ${k}/${n}`;
-    });
+        if (status) status.textContent = `Cleaning up… ${Math.round((k / n) * 100)}%`;
+    }, slot.crop);
     const path = await putFile(`scene_${slot.id}_sheet_${Date.now()}.png`, blob);
     const old = slot.sheet?.path;
     slot.sheet = { path, ...meta };
@@ -882,6 +911,10 @@ async function uploadImage(slot, file) {
     dropFile(old);
     dropFile(oldSheet);
     if (settings().cleanup && canCleanUp()) {
+        // Offer a crop first; skipping it keeps the whole picture.
+        const crop = await cropDialog(urlOf(path), slot.crop ?? null, true);
+        slot.crop = crop ?? undefined;
+        save();
         try {
             await cleanSlot(slot, file);
         } catch (err) {
@@ -898,6 +931,76 @@ async function recleanSlot(slot) {
     const blob = await res.blob();
     const file = new File([blob], slot.path.split('/').pop(), { type: blob.type });
     await cleanSlot(slot, file);
+}
+
+// ---------- crop screen ----------
+// Four sliders (one per side) over a preview of the image; easier on a phone
+// than dragging corners. Resolves with { l, t, r, b } fractions, or null for
+// "no crop", or undefined when cancelled.
+function cropDialog(url, start, fromUpload) {
+    return new Promise((resolve) => {
+        const c = { l: 0, t: 0, r: 0, b: 0, ...(start ?? {}) };
+        const box = document.createElement('div');
+        box.id = 'ssb-crop';
+        box.innerHTML = `
+            <div class="ssb-crop-panel">
+                <b>Crop the image</b>
+                <small>Cut away anything you don't want in the silhouette. Empty space around the figure is trimmed automatically afterwards.</small>
+                <div class="ssb-crop-view">
+                    <div class="ssb-crop-frame">
+                        <img alt="">
+                        <div class="ssb-crop-shade"></div>
+                        <div class="ssb-crop-box"></div>
+                    </div>
+                </div>
+                ${['l', 'r', 't', 'b'].map(k => `<label>${{ l: 'Left', r: 'Right', t: 'Top', b: 'Bottom' }[k]} <span data-v="${k}"></span>
+                    <input type="range" min="0" max="45" step="1" data-c="${k}" value="${Math.round(c[k] * 100)}"></label>`).join('')}
+                <div class="ssb-row">
+                    <button type="button" class="menu_button" data-x="apply">Apply</button>
+                    <button type="button" class="menu_button" data-x="reset">${fromUpload ? 'No crop' : 'Remove crop'}</button>
+                    ${fromUpload ? '' : '<button type="button" class="menu_button" data-x="cancel">Cancel</button>'}
+                </div>
+            </div>`;
+        document.body.appendChild(box);
+        const img = box.querySelector('img');
+        const frame = box.querySelector('.ssb-crop-frame');
+        const cropBox = box.querySelector('.ssb-crop-box');
+        const shade = box.querySelector('.ssb-crop-shade');
+        img.src = url;
+        const draw = () => {
+            for (const el of box.querySelectorAll('[data-v]')) el.textContent = `${Math.round(c[el.dataset.v] * 100)}%`;
+            const pos = { left: `${c.l * 100}%`, top: `${c.t * 100}%`, right: `${c.r * 100}%`, bottom: `${c.b * 100}%` };
+            Object.assign(cropBox.style, pos);
+            // Darken what will be cut away.
+            shade.style.clipPath = `polygon(0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${c.l * 100}% ${c.t * 100}%, ${c.l * 100}% ${100 - c.b * 100}%, ${100 - c.r * 100}% ${100 - c.b * 100}%, ${100 - c.r * 100}% ${c.t * 100}%, ${c.l * 100}% ${c.t * 100}%)`;
+        };
+        img.onload = () => {
+            // Size the preview to the image's shape so the crop box lines up exactly.
+            const view = box.querySelector('.ssb-crop-view');
+            const maxW = Math.max(100, view.clientWidth - 12);
+            const maxH = Math.max(100, innerHeight * 0.42);
+            const k = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight);
+            Object.assign(frame.style, { width: `${Math.round(img.naturalWidth * k)}px`, height: `${Math.round(img.naturalHeight * k)}px`, aspectRatio: 'auto' });
+            draw();
+        };
+        for (const input of box.querySelectorAll('[data-c]')) {
+            input.addEventListener('input', () => {
+                c[input.dataset.c] = Number(input.value) / 100;
+                draw();
+            });
+        }
+        draw();
+        const done = (value) => {
+            box.remove();
+            resolve(value);
+        };
+        box.addEventListener('click', (event) => {
+            const x = event.target.closest('[data-x]')?.dataset.x;
+            if (x === 'apply') done(c.l || c.t || c.r || c.b ? { l: c.l, t: c.t, r: c.r, b: c.b } : null);
+            else if (x === 'reset') done(null);
+            else if (x === 'cancel') done(undefined);
+        });
+    });
 }
 
 // ---------- settings UI ----------
@@ -928,6 +1031,7 @@ function slotRow(sl) {
                 <label class="menu_button ssb-file">Image<input type="file" accept="image/gif,image/png,image/webp,image/apng,image/avif,image/jpeg" hidden></label>
                 <button type="button" class="menu_button" data-a="preview"${sl.path ? '' : ' disabled'}>Show</button>
                 <button type="button" class="menu_button" data-a="use"${sl.path ? '' : ' disabled'} title="Use this for the current scene">Use now</button>
+                <button type="button" class="menu_button" data-a="crop"${sl.path ? '' : ' disabled'} title="Crop the image">Crop${sl.crop ? ' ✓' : ''}</button>
                 <button type="button" class="menu_button" data-a="clean"${sl.path ? '' : ' disabled'} title="Fill holes and remove stray pixels">Clean up</button>
                 <button type="button" class="menu_button" data-a="remove">✕</button>
             </div>
@@ -1181,6 +1285,22 @@ function buildSettings() {
             if (!chat.length || !slot.label.trim()) return;
             await writeScene(chat.length - 1, slot.label.trim());
             preview = null;
+            refresh();
+        } else if (a === 'crop') {
+            const crop = await cropDialog(urlOf(slot.path), slot.crop ?? null, false);
+            if (crop === undefined) return; // cancelled
+            slot.crop = crop ?? undefined;
+            save();
+            btn.disabled = true;
+            try {
+                await recleanSlot(slot);
+                toast('success', 'Cropped and cleaned up.');
+            } catch (err) {
+                console.error('[Scene Backdrop] crop failed', err);
+                toast('error', `Crop failed: ${err?.message ?? err}`);
+            }
+            renderSlots();
+            shownSlot = null;
             refresh();
         } else if (a === 'clean') {
             btn.disabled = true;

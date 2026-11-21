@@ -233,3 +233,76 @@
 .ssb-cond-note {
     opacity: 0.7;
 }
+
+/* crop screen */
+#ssb-crop {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.7);
+    padding: 10px;
+}
+
+.ssb-crop-panel {
+    width: min(460px, 100%);
+    max-height: 100%;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px;
+    border-radius: 12px;
+    background: var(--SmartThemeBlurTintColor, #1b1b20);
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.2));
+    color: var(--SmartThemeBodyColor, #ddd);
+}
+
+.ssb-crop-panel small {
+    opacity: 0.7;
+}
+
+.ssb-crop-panel label {
+    display: block;
+}
+
+.ssb-crop-panel input[type=range] {
+    width: 100%;
+}
+
+.ssb-crop-view {
+    display: flex;
+    justify-content: center;
+    padding: 6px;
+    border-radius: 8px;
+    background:
+        repeating-conic-gradient(#3a3a42 0 25%, #2a2a30 0 50%) 0 0 / 16px 16px;
+}
+
+.ssb-crop-frame {
+    position: relative;
+    width: 200px;
+    height: 200px;
+}
+
+.ssb-crop-frame img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.ssb-crop-shade {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    pointer-events: none;
+}
+
+.ssb-crop-box {
+    position: absolute;
+    border: 2px dashed #b56cff;
+    pointer-events: none;
+}
