@@ -6,7 +6,7 @@
 
 import { buildSheet, canCleanUp } from './cleanup.js';
 
-const VERSION = '1.7.0';
+const VERSION = '1.8.0';
 const MODULE = 'scene_backdrop';
 const SWIPES_KEY = `${MODULE}_swipes`;
 
@@ -16,6 +16,7 @@ const DEFAULTS = {
     enabled: true,
     slots: DEFAULT_LABELS.map((label, n) => ({ id: `s${n + 1}`, label, hint: '', path: '', onlyWith: '', needsEffect: '' })),
     allowNone: false,
+    onlyHappening: true,
     contextMessages: 4,
     silhouette: true,
     color: '#000000',
@@ -503,12 +504,15 @@ function buildPick(index, current) {
     }
     const noneRule = s.allowNone
         ? 'If none of them is happening at all, answer "none" as the group.'
-        : 'Always pick one of them, the closest match, even if the fit is loose. Never answer "none".';
+        : 'If something is happening, always pick one of them, the closest match, even if the fit is loose.';
+    const happeningRule = s.onlyHappening
+        ? `First decide whether one of these actions is physically taking place right now, in the newest message. An action that began earlier and is still going on counts, even if the newest message is mostly talk. Talking about it, planning, offering, asking, teasing, flirting, remembering, imagining or a dream does not count, and neither does an action that has already ended. If nothing is taking place, answer {"happening": false}.\n`
+        : '';
     const system = `You label scenes in an adult roleplay so a matching background image can be shown. You never write story text.
-Pick the group that best matches what is physically happening in the newest message.
+${happeningRule}Pick the group that best matches what is physically happening in the newest message.
 ${noneRule}
 The current group is "${curName}". Keep it unless a different group clearly fits the newest message better.
-Answer with JSON only: {"group": "<one group exactly as written>", "variant": "<variant name exactly as written, or default>"}
+Answer with JSON only: {${s.onlyHappening ? '"happening": true, ' : ''}"group": "<one group exactly as written>", "variant": "<variant name exactly as written, or default>"}
 
 GROUPS:
 ${groupLines}${variantBlock}${noteBlock}`;
@@ -533,10 +537,12 @@ function parseAnswer(raw) {
             const p = JSON.parse(t.slice(a, b + 1));
             const group = typeof p?.group === 'string' ? p.group.trim() : typeof p?.label === 'string' ? p.label.trim() : '';
             const variant = typeof p?.variant === 'string' ? p.variant.trim() : '';
-            if (group || variant) return { group, variant, text: t };
+            const happening = p?.happening === false || p?.happening === 'false' || p?.happening === 'no' ? false : true;
+            if (!happening) return { group: '', variant: '', happening, text: t };
+            if (group || variant) return { group, variant, happening, text: t };
         } catch { /* fall through */ }
     }
-    return { group: '', variant: '', text: t };
+    return { group: '', variant: '', happening: true, text: t };
 }
 
 // Turns the AI's answer into one image, using the plan for this message.
@@ -584,7 +590,8 @@ async function runPick(index, manual = false) {
         if (chatKey() !== key || ctx().chat?.[index] !== msg) return;
         const answer = parseAnswer(raw);
         let result;
-        if (answer.group.toLowerCase() === 'none' && s.allowNone) result = 'none';
+        if (s.onlyHappening && answer.happening === false) result = 'none';
+        else if (answer.group.toLowerCase() === 'none' && s.allowNone) result = 'none';
         else {
             const slot = decide(answer, pickPlan(index));
             result = slot ? slot.label : current;
@@ -990,6 +997,7 @@ function buildSettings() {
                 </div>
                 <label class="checkbox_label"><input type="checkbox" data-k="enabled"> Enabled</label>
                 <label class="checkbox_label"><input type="checkbox" data-k="allChats"> On in every chat unless turned off there</label>
+                <label class="checkbox_label"><input type="checkbox" data-k="onlyHappening"> Only while it's actually happening (not just talked about)</label>
                 <label class="checkbox_label"><input type="checkbox" data-k="allowNone"> Allow "none" (show nothing when no label fits)</label>
                 <hr>
                 <b>Look</b>

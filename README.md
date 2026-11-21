@@ -16,7 +16,7 @@ Then reload the page.
 
 1. Open **Extensions → Scene Backdrop** and give each label an image with the **Image** button. Images are saved in SillyTavern's own storage. Rename labels, add hints for the AI, or add more labels as you like.
 2. In a chat, open the **wand menu** next to the message box and tap **Scene backdrop** to turn it on for that chat. It's off by default everywhere (or turn on "On in every chat" in settings).
-3. After each character reply, a short AI request picks the label that fits best and the image fades in behind the messages. Picks are saved per swipe.
+3. After each character reply, a short AI request checks whether one of your actions is physically happening right now and, if so, picks the one that fits best. The image fades in behind the messages, and fades out again when the scene is only talk (planning, teasing, remembering). An act that's still going on counts even when the newest message is mostly dialogue. Picks are saved per swipe. Turn off **Only while it's actually happening** to always show the closest match instead.
 
 **Show** previews an image, **Use now** sets it by hand, **Pick now** re-runs the pick, and **Clear** removes the current image.
 
