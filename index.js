@@ -4,7 +4,7 @@
 // short AI call picks the label that fits best. Images can be shown as a plain
 // silhouette (any colour) so only their outline remains.
 
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 const MODULE = 'scene_backdrop';
 const SWIPES_KEY = `${MODULE}_swipes`;
 
@@ -252,7 +252,9 @@ function ensureHolder() {
         holder.innerHTML = '<div class="ssb-stage"><div class="ssb-fig"></div><div class="ssb-fig"></div></div>';
     }
     if (holder.parentElement !== chatEl || chatEl.firstElementChild !== holder) chatEl.prepend(holder);
-    holder.querySelector('.ssb-stage').style.height = `${chatEl.clientHeight}px`;
+    const stage = holder.querySelector('.ssb-stage');
+    stage.style.height = `${chatEl.clientHeight}px`;
+    stage.style.width = `${chatEl.clientWidth}px`;
     return holder;
 }
 
@@ -423,7 +425,9 @@ function buildSettings() {
                 <div class="ssb-row">
                     <button type="button" class="menu_button" id="ssb-add">Add label</button>
                     <button type="button" class="menu_button" id="ssb-stop">Stop preview</button>
+                    <button type="button" class="menu_button" id="ssb-diagnose">Diagnose</button>
                 </div>
+                <pre id="ssb-diag" class="ssb-diag" hidden></pre>
             </div>
         </div>`;
     host.appendChild(wrap);
@@ -474,6 +478,12 @@ function buildSettings() {
         s.slots.push({ id: `s${n}`, label: '', hint: '', path: '' });
         save();
         renderSlots();
+    });
+    wrap.querySelector('#ssb-diagnose').addEventListener('click', async () => {
+        const out = wrap.querySelector('#ssb-diag');
+        out.hidden = false;
+        out.textContent = 'Checking…';
+        out.textContent = await diagnose();
     });
     wrap.querySelector('#ssb-stop').addEventListener('click', () => {
         preview = null;
@@ -542,6 +552,51 @@ function buildSettings() {
             refresh();
         }
     });
+}
+
+// ---------- diagnostics ----------
+
+function loadImage(url) {
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve(`loads (${img.naturalWidth}x${img.naturalHeight})`);
+        img.onerror = () => resolve('FAILS to load');
+        img.src = url;
+        setTimeout(() => resolve('timed out'), 8000);
+    });
+}
+
+async function diagnose() {
+    const s = settings();
+    const lines = [`v${VERSION} · enabled ${s.enabled} · chat on ${chatOn()} · scene ${currentScene() ?? 'none'} · preview ${preview ?? 'off'}`];
+    lines.push(`look: silhouette ${s.silhouette}, colour ${s.color}, strength ${s.opacity}%, size ${s.size}%`);
+    const chatEl = document.getElementById('chat');
+    if (!chatEl) lines.push('chat area: missing');
+    else {
+        const r = chatEl.getBoundingClientRect();
+        const cs = getComputedStyle(chatEl);
+        lines.push(`chat area: ${Math.round(r.width)}x${Math.round(r.height)}, align-items ${cs.alignItems}, bg ${cs.backgroundColor}`);
+        const h = document.getElementById('ssb-holder');
+        if (!h) lines.push('layer: missing');
+        else {
+            const st = h.querySelector('.ssb-stage');
+            const sr = st.getBoundingClientRect();
+            const hr = h.getBoundingClientRect();
+            lines.push(`layer: first in chat ${chatEl.firstElementChild === h}, holder ${Math.round(hr.width)}px wide, stage ${Math.round(sr.width)}x${Math.round(sr.height)} at y${Math.round(sr.top)}, opacity ${getComputedStyle(st).opacity}`);
+            const on = h.querySelector('.ssb-fig.ssb-on');
+            if (!on) lines.push('figure: none showing');
+            else {
+                const fcs = getComputedStyle(on);
+                lines.push(`figure: opacity ${fcs.opacity}, mask ${(fcs.webkitMaskImage || fcs.maskImage || 'none').slice(0, 70)}`);
+            }
+        }
+    }
+    for (const sl of s.slots.filter(x => x.path)) {
+        const url = sl.path.startsWith('/') ? sl.path : `/${sl.path}`;
+        lines.push(`${sl.label}: ${url} → ${await loadImage(url)}`);
+    }
+    if (!s.slots.some(x => x.path)) lines.push('no images uploaded yet');
+    return lines.join('\n');
 }
 
 // Quick on/off in the wand menu next to the message box.
