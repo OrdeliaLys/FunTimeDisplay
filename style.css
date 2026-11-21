@@ -1,0 +1,129 @@
+/* Scene Backdrop */
+
+/* Makes sure the chat area stacks its own content, so the backdrop can sit
+   between the chat's background colour and the messages. */
+#chat {
+    isolation: isolate;
+}
+
+/* Zero-height sticky first child: stays at the top of the visible chat while
+   scrolling, drawn behind every message. */
+#ssb-holder {
+    position: sticky;
+    top: 0;
+    flex: 0 0 0;
+    height: 0;
+    z-index: -1;
+    pointer-events: none;
+    overflow: visible;
+}
+
+.ssb-stage {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    pointer-events: none;
+    overflow: hidden;
+    opacity: var(--ssb-opacity, 0.55);
+}
+
+.ssb-fig {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    transition: opacity 0.9s ease;
+}
+
+.ssb-fig.ssb-on {
+    opacity: 1;
+}
+
+/* settings */
+#ssb-settings label:not(.checkbox_label):not(.ssb-file) {
+    display: block;
+    margin: 6px 0;
+}
+
+#ssb-settings .checkbox_label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0;
+}
+
+.ssb-status {
+    margin: 4px 0 8px;
+    opacity: 0.85;
+    font-size: 0.9em;
+}
+
+.ssb-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 6px 0;
+}
+
+.ssb-slot {
+    display: flex;
+    gap: 8px;
+    padding: 8px;
+    margin: 6px 0;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.ssb-slot-fields {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.ssb-slot-fields .text_pole {
+    margin: 0;
+    font-size: 16px; /* stops phones zooming in on focus */
+}
+
+.ssb-slot-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.ssb-slot-buttons .menu_button {
+    margin: 0;
+    min-height: 34px;
+    padding: 4px 10px;
+}
+
+.ssb-slot-buttons .ssb-sure {
+    border-color: #d9534f;
+    color: #ff8a85;
+}
+
+.ssb-thumb {
+    flex: 0 0 64px;
+    height: 64px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.85) var(--img) center / contain no-repeat;
+}
+
+/* silhouette preview: the image used as a mask over a black square */
+.ssb-thumb-sil {
+    background: rgba(235, 235, 240, 0.95);
+    -webkit-mask: var(--img) center / contain no-repeat;
+    mask: var(--img) center / contain no-repeat;
+    outline: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+.ssb-thumb-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75em;
+    opacity: 0.6;
+    background: rgba(255, 255, 255, 0.06);
+}
