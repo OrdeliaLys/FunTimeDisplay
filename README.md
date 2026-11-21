@@ -22,4 +22,8 @@ Then reload the page.
 
 ## Images
 
-As silhouettes, images need a transparent background: a GIF with a solid background shows as a solid block. Keep animated images small (a few hundred pixels tall, a few MB) so they stay light on phones.
+As silhouettes, images need a transparent background: a GIF with a solid background shows as a solid block.
+
+New images are cleaned up when you upload them: every frame is turned into a crisp solid shape, small holes left by background-removal tools are filled, and stray specks are removed. The frames are stored as one sheet the extension plays itself. Images uploaded before this existed can be cleaned with the **Clean up** button. With **Position: Automatic**, a figure that's cut off at the bottom of its image is pinned to the bottom of the chat so the cut edge stays off-screen.
+
+The **Edge glow** adds a soft halo around the outline so a black silhouette stays visible on a dark chat.

@@ -40,7 +40,10 @@
 
 .ssb-fig {
     position: absolute;
-    inset: 0;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
     opacity: 0;
     transition: opacity 0.9s ease;
 }
@@ -124,9 +127,23 @@
 /* silhouette preview: the image used as a mask over a black square */
 .ssb-thumb-sil {
     background: rgba(235, 235, 240, 0.95);
+    -webkit-mask: var(--img) 0 0 / var(--ms, contain) no-repeat;
+    mask: var(--img) 0 0 / var(--ms, contain) no-repeat;
+    aspect-ratio: var(--fa, auto);
+    flex: 0 0 auto;
+    width: auto;
+    max-width: 64px;
+    outline: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+.ssb-thumb-raw {
     -webkit-mask: var(--img) center / contain no-repeat;
     mask: var(--img) center / contain no-repeat;
-    outline: 1px solid rgba(255, 255, 255, 0.25);
+    width: 64px;
+}
+
+.ssb-progress {
+    opacity: 0.7;
 }
 
 .ssb-thumb-empty {

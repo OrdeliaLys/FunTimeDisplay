@@ -4,7 +4,9 @@
 // short AI call picks the label that fits best. Images can be shown as a plain
 // silhouette (any colour) so only their outline remains.
 
-const VERSION = '1.1.0';
+import { buildSheet, canCleanUp } from './cleanup.js';
+
+const VERSION = '1.2.0';
 const MODULE = 'scene_backdrop';
 const SWIPES_KEY = `${MODULE}_swipes`;
 
@@ -19,7 +21,8 @@ const DEFAULTS = {
     color: '#000000',
     opacity: 55,
     size: 85,
-    position: 'center',
+    anchor: 'auto',
+    cleanup: true,
     softness: 0,
     glow: 6,
     glowColor: '#c8b4ff',
@@ -42,6 +45,10 @@ function settings() {
     const s = store[MODULE];
     for (const [k, v] of Object.entries(DEFAULTS)) if (s[k] === undefined) s[k] = structuredClone(v);
     if (!Array.isArray(s.slots)) s.slots = structuredClone(DEFAULTS.slots);
+    if ('position' in s) {
+        delete s.position; // replaced by "anchor", which adds "auto"
+        s.anchor = 'auto';
+    }
     return s;
 }
 
@@ -260,27 +267,131 @@ function ensureHolder() {
     return holder;
 }
 
-function figureStyle(fig, slot) {
-    const s = settings();
-    const url = `url("${encodeURI(slot.path.startsWith('/') || /^[a-z]+:/i.test(slot.path) ? slot.path : '/' + slot.path)}")`;
-    const pos = { center: 'center', bottom: 'center bottom', top: 'center top' }[s.position] ?? 'center';
-    const size = `auto ${s.size}%`;
-    if (s.silhouette) {
-        fig.style.backgroundImage = 'none';
-        fig.style.backgroundColor = s.color;
-        for (const p of ['maskImage', 'webkitMaskImage']) fig.style[p] = url;
-        for (const p of ['maskSize', 'webkitMaskSize']) fig.style[p] = size;
-        for (const p of ['maskPosition', 'webkitMaskPosition']) fig.style[p] = pos;
-        for (const p of ['maskRepeat', 'webkitMaskRepeat']) fig.style[p] = 'no-repeat';
-    } else {
-        for (const p of ['maskImage', 'webkitMaskImage']) fig.style[p] = 'none';
-        fig.style.backgroundColor = 'transparent';
-        fig.style.backgroundImage = url;
-        fig.style.backgroundSize = size;
-        fig.style.backgroundPosition = pos;
-        fig.style.backgroundRepeat = 'no-repeat';
+function urlOf(path) {
+    return path.startsWith('/') || /^[a-z]+:/i.test(path) ? path : `/${path}`;
+}
+
+function setMask(el, value) {
+    el.style.maskImage = value;
+    el.style.webkitMaskImage = value;
+}
+
+// One figure slot of the crossfade. Plays a cleaned frame sheet itself, or
+// falls back to the original image when there is no sheet.
+class Figure {
+    constructor(el) {
+        this.el = el;
+        this.slot = null;
+        this.frame = 0;
+        this.due = 0;
     }
-    fig.style.filter = s.softness > 0 ? `blur(${s.softness}px)` : 'none';
+
+    show(slot) {
+        this.slot = slot;
+        this.frame = 0;
+        this.due = performance.now() + (slot?.sheet?.durations?.[0] ?? 100);
+        this.style();
+        this.layout();
+        loop();
+    }
+
+    clear() {
+        this.slot = null;
+    }
+
+    get animated() {
+        return !!(this.slot?.sheet && this.slot.sheet.n > 1 && settings().silhouette);
+    }
+
+    style() {
+        const s = settings();
+        const el = this.el;
+        const slot = this.slot;
+        if (!slot) return;
+        el.style.filter = s.softness > 0 ? `blur(${s.softness}px)` : 'none';
+        if (s.silhouette) {
+            const src = slot.sheet?.path ?? slot.path;
+            el.style.backgroundImage = 'none';
+            el.style.backgroundColor = s.color;
+            setMask(el, `url("${encodeURI(urlOf(src))}")`);
+            el.style.maskRepeat = el.style.webkitMaskRepeat = 'no-repeat';
+        } else {
+            setMask(el, 'none');
+            el.style.backgroundColor = 'transparent';
+            el.style.backgroundImage = `url("${encodeURI(urlOf(slot.path))}")`;
+            el.style.backgroundRepeat = 'no-repeat';
+        }
+    }
+
+    // Size and place the figure inside the stage.
+    layout() {
+        const slot = this.slot;
+        const stage = this.el.parentElement?.parentElement;
+        if (!slot || !stage) return;
+        const s = settings();
+        const sw = stage.clientWidth;
+        const sh = stage.clientHeight;
+        const sheet = s.silhouette ? slot.sheet : null;
+        const aspect = sheet ? sheet.fw / sheet.fh : (slot.aspect || 0.75);
+        const h = Math.round(sh * (s.size / 100));
+        const w = Math.round(h * aspect);
+        let anchor = s.anchor;
+        if (anchor === 'auto') anchor = sheet?.touchBottom ? 'bottom' : sheet?.touchTop && !sheet?.touchBottom ? 'top' : 'center';
+        const top = anchor === 'bottom' ? sh - h : anchor === 'top' ? 0 : Math.round((sh - h) / 2);
+        Object.assign(this.el.style, { right: 'auto', bottom: 'auto', left: `${Math.round((sw - w) / 2)}px`, top: `${top}px`, width: `${w}px`, height: `${h}px` });
+        this.w = w;
+        this.h = h;
+        if (sheet) {
+            const size = `${w * sheet.cols}px ${h * sheet.rows}px`;
+            this.el.style.maskSize = this.el.style.webkitMaskSize = size;
+            this.placeFrame();
+        } else if (s.silhouette) {
+            this.el.style.maskSize = this.el.style.webkitMaskSize = 'contain';
+            this.el.style.maskPosition = this.el.style.webkitMaskPosition = 'center';
+        } else {
+            this.el.style.backgroundSize = 'contain';
+            this.el.style.backgroundPosition = 'center';
+        }
+    }
+
+    placeFrame() {
+        const sheet = this.slot?.sheet;
+        if (!sheet) return;
+        const col = this.frame % sheet.cols;
+        const row = Math.floor(this.frame / sheet.cols);
+        const pos = `${-col * this.w}px ${-row * this.h}px`;
+        this.el.style.maskPosition = this.el.style.webkitMaskPosition = pos;
+    }
+
+    tick(now) {
+        if (!this.animated || now < this.due) return;
+        const sheet = this.slot.sheet;
+        let guard = 0;
+        while (now >= this.due && guard++ < sheet.n) {
+            this.frame = (this.frame + 1) % sheet.n;
+            this.due += sheet.durations[this.frame] ?? 100;
+        }
+        if (now - this.due > 1000) this.due = now + (sheet.durations[this.frame] ?? 100); // after the tab was in the background
+        this.placeFrame();
+    }
+}
+
+let figures = [];
+let looping = false;
+
+function loop() {
+    if (looping) return;
+    looping = true;
+    const step = (now) => {
+        const active = figures.filter(f => f.animated && f.el.classList.contains('ssb-on'));
+        if (!active.length) {
+            looping = false;
+            return;
+        }
+        for (const f of active) f.tick(now);
+        requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
 }
 
 function renderBackdrop() {
@@ -294,6 +405,9 @@ function renderBackdrop() {
     }
     const h = ensureHolder();
     if (!h) return;
+    if (!figures.length || figures[0].el.parentElement !== h.querySelector('.ssb-glow')) {
+        figures = [...h.querySelectorAll('.ssb-fig')].map(el => new Figure(el));
+    }
     h.style.setProperty('--ssb-opacity', String(s.opacity / 100));
     // Edge glow: a soft halo following the silhouette's outline, so a dark
     // shape stays readable on a dark chat background.
@@ -301,29 +415,80 @@ function renderBackdrop() {
     glowEl.style.filter = s.glow > 0
         ? `drop-shadow(0 0 ${s.glow}px ${s.glowColor}) drop-shadow(0 0 ${Math.max(1, Math.round(s.glow / 3))}px ${s.glowColor})`
         : 'none';
-    const [a, b] = h.querySelectorAll('.ssb-fig');
-    const sig = slot ? `${slot.id}|${slot.path}|${s.silhouette}|${s.color}|${s.size}|${s.position}|${s.softness}` : '';
-    if (sig === shownSlot) return;
+    const [a, b] = figures;
+    const sig = slot ? `${slot.id}|${slot.path}|${slot.sheet?.path ?? ''}|${s.silhouette}|${s.color}|${s.size}|${s.anchor}|${s.softness}` : '';
+    if (sig === shownSlot) {
+        for (const f of figures) if (f.slot) f.layout();
+        return;
+    }
+    const sameImage = slot && shownSlot && shownSlot.split('|').slice(0, 3).join('|') === sig.split('|').slice(0, 3).join('|');
     shownSlot = sig;
+    const front = a.el.classList.contains('ssb-on') ? a : b;
+    if (sameImage) {
+        // Only the look changed: restyle in place, no crossfade.
+        front.style();
+        front.layout();
+        return;
+    }
     // Crossfade: the hidden figure takes the new image and fades in.
-    const front = a.classList.contains('ssb-on') ? a : b;
     const back = front === a ? b : a;
     if (slot) {
-        figureStyle(back, slot);
-        back.classList.add('ssb-on');
+        back.show(slot);
+        back.el.classList.add('ssb-on');
+    } else {
+        back.clear();
     }
-    front.classList.remove('ssb-on');
+    front.el.classList.remove('ssb-on');
 }
 
 // ---------- uploads ----------
 
-function readAsBase64(file) {
+function readAsBase64(blob) {
     return new Promise((resolve, reject) => {
         const r = new FileReader();
         r.onload = () => resolve(String(r.result).split(',')[1] ?? '');
         r.onerror = () => reject(r.error);
-        r.readAsDataURL(file);
+        r.readAsDataURL(blob);
     });
+}
+
+async function putFile(name, blob) {
+    const res = await fetch('/api/files/upload', {
+        method: 'POST',
+        headers: ctx().getRequestHeaders(),
+        body: JSON.stringify({ name, data: await readAsBase64(blob) }),
+    });
+    if (!res.ok) throw new Error(await res.text() || `upload failed (${res.status})`);
+    return (await res.json()).path;
+}
+
+function dropFile(path) {
+    if (path && path.includes('/files/scene_')) {
+        fetch('/api/files/delete', { method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify({ path }) }).catch(() => {});
+    }
+}
+
+function imageAspect(url) {
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve(img.naturalWidth / Math.max(1, img.naturalHeight));
+        img.onerror = () => resolve(0.75);
+        img.src = url;
+    });
+}
+
+// Cleans an image into a frame sheet and stores it on the slot.
+async function cleanSlot(slot, file) {
+    if (!canCleanUp()) throw new Error('this browser cannot clean up animations');
+    const status = document.querySelector(`.ssb-slot[data-slot="${slot.id}"] .ssb-progress`);
+    const { blob, meta } = await buildSheet(file, (k, n) => {
+        if (status) status.textContent = `Cleaning up… ${k}/${n}`;
+    });
+    const path = await putFile(`scene_${slot.id}_sheet_${Date.now()}.png`, blob);
+    const old = slot.sheet?.path;
+    slot.sheet = { path, ...meta };
+    save();
+    dropFile(old);
 }
 
 async function uploadImage(slot, file) {
@@ -332,29 +497,44 @@ async function uploadImage(slot, file) {
         toast('warning', 'Use a GIF, PNG, WebP, APNG, AVIF or JPG image.');
         return;
     }
-    const name = `scene_${slot.id}_${Date.now()}.${ext}`;
-    const data = await readAsBase64(file);
-    const res = await fetch('/api/files/upload', {
-        method: 'POST',
-        headers: ctx().getRequestHeaders(),
-        body: JSON.stringify({ name, data }),
-    });
-    if (!res.ok) throw new Error(await res.text() || `upload failed (${res.status})`);
-    const { path } = await res.json();
+    const path = await putFile(`scene_${slot.id}_${Date.now()}.${ext}`, file);
     const old = slot.path;
     slot.path = path;
+    slot.aspect = await imageAspect(urlOf(path));
+    const oldSheet = slot.sheet?.path;
+    delete slot.sheet;
     save();
-    if (old && old.includes('/files/scene_')) {
-        fetch('/api/files/delete', { method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify({ path: old }) }).catch(() => {});
+    dropFile(old);
+    dropFile(oldSheet);
+    if (settings().cleanup && canCleanUp()) {
+        try {
+            await cleanSlot(slot, file);
+        } catch (err) {
+            console.warn('[Scene Backdrop] clean-up failed, using the original image', err);
+            toast('warning', `Couldn't clean up this image (${err?.message ?? err}); using it as it is.`);
+        }
     }
+}
+
+// Re-cleans an image that was uploaded earlier.
+async function recleanSlot(slot) {
+    const res = await fetch(urlOf(slot.path));
+    if (!res.ok) throw new Error(`couldn't load the image (${res.status})`);
+    const blob = await res.blob();
+    const file = new File([blob], slot.path.split('/').pop(), { type: blob.type });
+    await cleanSlot(slot, file);
 }
 
 // ---------- settings UI ----------
 
 function slotRow(sl) {
-    const thumb = sl.path
-        ? `<div class="ssb-thumb ${settings().silhouette ? 'ssb-thumb-sil' : ''}" style="--img:url('${escapeHtml(encodeURI(sl.path.startsWith('/') ? sl.path : '/' + sl.path))}')"></div>`
-        : '<div class="ssb-thumb ssb-thumb-empty">no image</div>';
+    let thumb = '<div class="ssb-thumb ssb-thumb-empty">no image</div>';
+    if (sl.path && settings().silhouette && sl.sheet) {
+        const sh = sl.sheet;
+        thumb = `<div class="ssb-thumb ssb-thumb-sil" style="--img:url('${escapeHtml(encodeURI(urlOf(sh.path)))}');--ms:${sh.cols * 100}% ${sh.rows * 100}%;--fa:${sh.fw}/${sh.fh}"></div>`;
+    } else if (sl.path) {
+        thumb = `<div class="ssb-thumb ${settings().silhouette ? 'ssb-thumb-sil ssb-thumb-raw' : ''}" style="--img:url('${escapeHtml(encodeURI(urlOf(sl.path)))}')"></div>`;
+    }
     return `<div class="ssb-slot" data-slot="${escapeHtml(sl.id)}">
         ${thumb}
         <div class="ssb-slot-fields">
@@ -364,8 +544,10 @@ function slotRow(sl) {
                 <label class="menu_button ssb-file">Image<input type="file" accept="image/gif,image/png,image/webp,image/apng,image/avif,image/jpeg" hidden></label>
                 <button type="button" class="menu_button" data-a="preview"${sl.path ? '' : ' disabled'}>Show</button>
                 <button type="button" class="menu_button" data-a="use"${sl.path ? '' : ' disabled'} title="Use this for the current scene">Use now</button>
+                <button type="button" class="menu_button" data-a="clean"${sl.path ? '' : ' disabled'} title="Fill holes and remove stray pixels">Clean up</button>
                 <button type="button" class="menu_button" data-a="remove">✕</button>
             </div>
+            <small class="ssb-progress">${sl.path ? (sl.sheet ? `Cleaned · ${sl.sheet.n} frame${sl.sheet.n === 1 ? '' : 's'}` : 'Original image (not cleaned)') : ''}</small>
         </div>
     </div>`;
 }
@@ -421,12 +603,14 @@ function buildSettings() {
                 <label>Edge glow colour <input type="color" data-k="glowColor"></label>
                 <label>Soft edges <span data-v="softness"></span><input type="range" min="0" max="12" step="1" data-k="softness"></label>
                 <label>Position
-                    <select class="text_pole" data-k="position">
+                    <select class="text_pole" data-k="anchor">
+                        <option value="auto">Automatic (bottom if the figure is cut off there)</option>
                         <option value="center">Middle</option>
                         <option value="bottom">Bottom</option>
                         <option value="top">Top</option>
                     </select>
                 </label>
+                <label class="checkbox_label"><input type="checkbox" data-k="cleanup"> Clean up new images (fill holes, remove stray pixels)</label>
                 <label>Messages the pick reads <input class="text_pole" type="number" min="1" max="12" data-k="contextMessages"></label>
                 <hr>
                 <b>Images</b>
@@ -547,6 +731,18 @@ function buildSettings() {
             await writeScene(chat.length - 1, slot.label.trim());
             preview = null;
             refresh();
+        } else if (a === 'clean') {
+            btn.disabled = true;
+            try {
+                await recleanSlot(slot);
+                toast('success', 'Cleaned up.');
+            } catch (err) {
+                console.error('[Scene Backdrop] clean-up failed', err);
+                toast('error', `Clean-up failed: ${err?.message ?? err}`);
+            }
+            renderSlots();
+            shownSlot = null;
+            refresh();
         } else if (a === 'remove') {
             if (!btn.classList.contains('ssb-sure')) {
                 btn.classList.add('ssb-sure');
@@ -554,9 +750,8 @@ function buildSettings() {
                 return;
             }
             s.slots = s.slots.filter(sl => sl !== slot);
-            if (slot.path && slot.path.includes('/files/scene_')) {
-                fetch('/api/files/delete', { method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify({ path: slot.path }) }).catch(() => {});
-            }
+            dropFile(slot.path);
+            dropFile(slot.sheet?.path);
             save();
             renderSlots();
             refresh();
@@ -578,7 +773,7 @@ function loadImage(url) {
 
 async function diagnose() {
     const s = settings();
-    const lines = [`v${VERSION} · enabled ${s.enabled} · chat on ${chatOn()} · scene ${currentScene() ?? 'none'} · preview ${preview ?? 'off'}`];
+    const lines = [`clean-up supported: ${canCleanUp()}`, `v${VERSION} · enabled ${s.enabled} · chat on ${chatOn()} · scene ${currentScene() ?? 'none'} · preview ${preview ?? 'off'}`];
     lines.push(`look: silhouette ${s.silhouette}, colour ${s.color}, strength ${s.opacity}%, size ${s.size}%, glow ${s.glow}px ${s.glowColor}`);
     const chatEl = document.getElementById('chat');
     if (!chatEl) lines.push('chat area: missing');
@@ -602,8 +797,8 @@ async function diagnose() {
         }
     }
     for (const sl of s.slots.filter(x => x.path)) {
-        const url = sl.path.startsWith('/') ? sl.path : `/${sl.path}`;
-        lines.push(`${sl.label}: ${url} → ${await loadImage(url)}`);
+        const url = urlOf(sl.path);
+        lines.push(`${sl.label}: ${url} → ${await loadImage(url)}${sl.sheet ? ` · cleaned ${sl.sheet.n} frames ${sl.sheet.fw}x${sl.sheet.fh}, sheet ${await loadImage(urlOf(sl.sheet.path))}` : ' · not cleaned'}`);
     }
     if (!s.slots.some(x => x.path)) lines.push('no images uploaded yet');
     return lines.join('\n');
@@ -639,7 +834,10 @@ function watchChat() {
         }
     });
     observer.observe(chatEl, { childList: true });
-    new ResizeObserver(() => ensureHolder()).observe(chatEl);
+    new ResizeObserver(() => {
+        ensureHolder();
+        for (const f of figures) if (f.slot) f.layout();
+    }).observe(chatEl);
 }
 
 function wireEvents() {
