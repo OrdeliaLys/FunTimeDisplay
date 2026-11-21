@@ -6,7 +6,7 @@
 
 import { buildSheet, canCleanUp } from './cleanup.js';
 
-const VERSION = '1.8.0';
+const VERSION = '1.8.1';
 const MODULE = 'scene_backdrop';
 const SWIPES_KEY = `${MODULE}_swipes`;
 
@@ -745,13 +745,24 @@ let looping = false;
 function loop() {
     if (looping) return;
     looping = true;
+    let pausedSince = null;
     const step = (now) => {
         const active = figures.filter(f => f.animated && f.el.classList.contains('ssb-on'));
         if (!active.length) {
             looping = false;
             return;
         }
-        for (const f of active) f.tick(now);
+        // Silly Optimizer can hold effects still (while scrolling); resume
+        // from the same frame afterwards instead of skipping ahead.
+        if (document.body.classList.contains('opt-paused')) {
+            pausedSince ??= now;
+        } else {
+            if (pausedSince !== null) {
+                for (const f of active) f.due += now - pausedSince;
+                pausedSince = null;
+            }
+            for (const f of active) f.tick(now);
+        }
         requestAnimationFrame(step);
     };
     requestAnimationFrame(step);
