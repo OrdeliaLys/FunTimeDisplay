@@ -33,6 +33,11 @@
     opacity: var(--ssb-opacity, 0.55);
 }
 
+.ssb-glow {
+    position: absolute;
+    inset: 0;
+}
+
 .ssb-fig {
     position: absolute;
     inset: 0;

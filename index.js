@@ -4,7 +4,7 @@
 // short AI call picks the label that fits best. Images can be shown as a plain
 // silhouette (any colour) so only their outline remains.
 
-const VERSION = '1.0.1';
+const VERSION = '1.1.0';
 const MODULE = 'scene_backdrop';
 const SWIPES_KEY = `${MODULE}_swipes`;
 
@@ -21,6 +21,8 @@ const DEFAULTS = {
     size: 85,
     position: 'center',
     softness: 0,
+    glow: 6,
+    glowColor: '#c8b4ff',
     allChats: false,
 };
 
@@ -249,7 +251,7 @@ function ensureHolder() {
     if (!holder) {
         holder = document.createElement('div');
         holder.id = 'ssb-holder';
-        holder.innerHTML = '<div class="ssb-stage"><div class="ssb-fig"></div><div class="ssb-fig"></div></div>';
+        holder.innerHTML = '<div class="ssb-stage"><div class="ssb-glow"><div class="ssb-fig"></div><div class="ssb-fig"></div></div></div>';
     }
     if (holder.parentElement !== chatEl || chatEl.firstElementChild !== holder) chatEl.prepend(holder);
     const stage = holder.querySelector('.ssb-stage');
@@ -293,6 +295,12 @@ function renderBackdrop() {
     const h = ensureHolder();
     if (!h) return;
     h.style.setProperty('--ssb-opacity', String(s.opacity / 100));
+    // Edge glow: a soft halo following the silhouette's outline, so a dark
+    // shape stays readable on a dark chat background.
+    const glowEl = h.querySelector('.ssb-glow');
+    glowEl.style.filter = s.glow > 0
+        ? `drop-shadow(0 0 ${s.glow}px ${s.glowColor}) drop-shadow(0 0 ${Math.max(1, Math.round(s.glow / 3))}px ${s.glowColor})`
+        : 'none';
     const [a, b] = h.querySelectorAll('.ssb-fig');
     const sig = slot ? `${slot.id}|${slot.path}|${s.silhouette}|${s.color}|${s.size}|${s.position}|${s.softness}` : '';
     if (sig === shownSlot) return;
@@ -409,6 +417,8 @@ function buildSettings() {
                 <label>Silhouette colour <input type="color" data-k="color"></label>
                 <label>Strength <span data-v="opacity"></span><input type="range" min="5" max="100" step="5" data-k="opacity"></label>
                 <label>Size <span data-v="size"></span><input type="range" min="30" max="100" step="5" data-k="size"></label>
+                <label>Edge glow <span data-v="glow"></span><input type="range" min="0" max="24" step="1" data-k="glow"></label>
+                <label>Edge glow colour <input type="color" data-k="glowColor"></label>
                 <label>Soft edges <span data-v="softness"></span><input type="range" min="0" max="12" step="1" data-k="softness"></label>
                 <label>Position
                     <select class="text_pole" data-k="position">
@@ -435,7 +445,7 @@ function buildSettings() {
     const showVal = () => {
         for (const el of wrap.querySelectorAll('[data-v]')) {
             const k = el.dataset.v;
-            el.textContent = k === 'softness' ? `${s[k]}px` : `${s[k]}%`;
+            el.textContent = k === 'softness' || k === 'glow' ? `${s[k]}px` : `${s[k]}%`;
         }
     };
     for (const input of wrap.querySelectorAll('[data-k]')) {
@@ -569,7 +579,7 @@ function loadImage(url) {
 async function diagnose() {
     const s = settings();
     const lines = [`v${VERSION} · enabled ${s.enabled} · chat on ${chatOn()} · scene ${currentScene() ?? 'none'} · preview ${preview ?? 'off'}`];
-    lines.push(`look: silhouette ${s.silhouette}, colour ${s.color}, strength ${s.opacity}%, size ${s.size}%`);
+    lines.push(`look: silhouette ${s.silhouette}, colour ${s.color}, strength ${s.opacity}%, size ${s.size}%, glow ${s.glow}px ${s.glowColor}`);
     const chatEl = document.getElementById('chat');
     if (!chatEl) lines.push('chat area: missing');
     else {
