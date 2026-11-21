@@ -6,7 +6,7 @@
 
 import { buildSheet, canCleanUp } from './cleanup.js';
 
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 const MODULE = 'scene_backdrop';
 const SWIPES_KEY = `${MODULE}_swipes`;
 
@@ -123,10 +123,11 @@ function activeEffects() {
     }
 }
 
-// Everything that describes who is in the scene: the chat's character cards
-// (description, personality, scenario, tags), your persona description and
-// the recent messages. Used for traits like "fox ears" or "kitsune".
-function traitText(upto) {
+// Everything that describes who is in the scene, as separate sources so a
+// match can say where it came from: each character card in the chat
+// (description, personality, scenario, tags), your persona description, and
+// the recent messages.
+function traitSources(upto) {
     const c = ctx();
     const cards = [];
     if (c.groupId) {
@@ -139,31 +140,47 @@ function traitText(upto) {
         const ch = c.characters?.[c.characterId];
         if (ch) cards.push(ch);
     }
-    const parts = [];
+    const out = [];
     for (const ch of cards) {
-        parts.push(ch.name, ch.description, ch.personality, ch.scenario, ch.data?.description, ch.data?.personality);
-        if (Array.isArray(ch.data?.tags)) parts.push(ch.data.tags.join(' '));
-        for (const id of c.tagMap?.[ch.avatar] ?? []) parts.push(c.tags?.find(t => String(t.id) === String(id))?.name);
+        const tagNames = [
+            ...(Array.isArray(ch.data?.tags) ? ch.data.tags : []),
+            ...(c.tagMap?.[ch.avatar] ?? []).map(id => c.tags?.find(t => String(t.id) === String(id))?.name),
+        ].filter(Boolean);
+        const text = [ch.description, ch.personality, ch.scenario, ch.data?.description !== ch.description ? ch.data?.description : '',
+            tagNames.length ? `Tags: ${tagNames.join(', ')}` : ''].filter(Boolean).join('\n');
+        out.push({ kind: 'card', who: ch.name, text, lower: text.toLowerCase() });
     }
-    parts.push(c.powerUserSettings?.persona_description);
-    parts.push(recentText(upto));
-    return parts.filter(Boolean).join(' \n ').toLowerCase();
+    const persona = c.powerUserSettings?.persona_description;
+    if (persona) out.push({ kind: 'persona', who: c.name1 ?? 'User', text: persona, lower: persona.toLowerCase() });
+    const recent = recentText(upto);
+    out.push({ kind: 'recent', who: 'recent messages', text: recent, lower: recent });
+    return out;
 }
 
-function wordIn(text, word) {
-    return new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegex(word)}($|[^\\p{L}\\p{N}])`, 'u').test(text);
+function wordAt(lower, word) {
+    const m = new RegExp(`(^|[^\\p{L}\\p{N}])(${escapeRegex(word)})($|[^\\p{L}\\p{N}])`, 'u').exec(lower);
+    return m ? m.index + m[1].length : -1;
 }
 
-// One "Needs" item: met by an active SillyStatus effect, or (without a stage
-// comparison) by the trait appearing on a card, the persona or recent messages.
-function itemMatches(item, effects, traits) {
-    return item.split('|').map(x => x.trim()).filter(Boolean).some(alt => {
+// A short snippet of the source around the match, trimmed to whole words.
+function excerpt(src, at, len, room = 170) {
+    let a = Math.max(0, at - room);
+    let b = Math.min(src.text.length, at + len + room);
+    if (a > 0) a = src.text.indexOf(' ', a) + 1 || a;
+    if (b < src.text.length) b = src.text.lastIndexOf(' ', b) > at + len ? src.text.lastIndexOf(' ', b) : b;
+    return `${a > 0 ? '…' : ''}${src.text.slice(a, b).replace(/\s+/g, ' ').trim()}${b < src.text.length ? '…' : ''}`;
+}
+
+// One "Needs" item. Returns how it was met (or null): an active SillyStatus
+// effect, or (without a stage comparison) the trait on a card, the persona
+// or the recent messages.
+function matchItem(item, effects, sources) {
+    for (const alt of item.split('|').map(x => x.trim()).filter(Boolean)) {
         const m = alt.match(/^(.*?)\s*(>=|>|<=|<|=)\s*(\d+)$/);
         const name = (m ? m[1] : alt).trim().toLowerCase();
         const op = m?.[2];
         const n = m ? Number(m[3]) : null;
-        if (!op && traits && wordIn(traits, name)) return true;
-        return (effects ?? []).some(e => {
+        const eff = (effects ?? []).find(e => {
             if (!(e.stage > 0)) return false;
             const hit = (e.icon && e.icon.toLowerCase() === name)
                 || (e.visual && e.visual.toLowerCase() === name)
@@ -172,16 +189,29 @@ function itemMatches(item, effects, traits) {
             if (!op) return true;
             return { '>=': e.stage >= n, '>': e.stage > n, '<=': e.stage <= n, '<': e.stage < n, '=': e.stage === n }[op];
         });
-    });
+        if (eff) return { via: 'effect', alt, who: eff.target ?? '' };
+        if (op) continue;
+        // Recent messages first: the AI reads them anyway, so no snippet is needed.
+        const order = [...sources.filter(x => x.kind === 'recent'), ...sources.filter(x => x.kind !== 'recent')];
+        for (const src of order) {
+            const at = wordAt(src.lower, name);
+            if (at >= 0) return { via: src.kind, alt, who: src.who, note: src.kind === 'recent' ? '' : excerpt(src, at, name.length) };
+        }
+    }
+    return null;
 }
 
-// { met, conditional, why } for a label at a point in the chat.
+// { met, conditional, confirm, notes, why } for a label at a point in the chat.
+// confirm: the AI should check the trait is true right now (a word match can
+// be backstory, another form, or something that has since changed).
 function conditionsOf(slot, upto) {
     const people = splitList(slot.onlyWith);
     const needs = splitList(slot.needsEffect);
-    if (!people.length && !needs.length) return { met: true, conditional: false, why: '' };
+    if (!people.length && !needs.length) return { met: true, conditional: false, confirm: false, notes: [], why: '' };
     const reasons = [];
+    const notes = [];
     let met = true;
+    let confirm = false;
     if (people.length) {
         const names = chatCharacterNames();
         const text = recentText(upto);
@@ -193,14 +223,30 @@ function conditionsOf(slot, upto) {
     }
     if (needs.length) {
         const effects = activeEffects();
-        const traits = traitText(upto);
-        const missing = needs.filter(item => !itemMatches(item, effects, traits));
+        const sources = traitSources(upto);
+        const missing = [];
+        const found = [];
+        for (const item of needs) {
+            const hit = matchItem(item, effects, sources);
+            if (!hit) {
+                missing.push(item);
+                continue;
+            }
+            found.push(`${hit.alt} (${hit.via === 'effect' ? 'effect' : hit.via === 'recent' ? 'in recent messages' : `${hit.who}'s ${hit.via === 'persona' ? 'persona' : 'card'}`})`);
+            // Traits found as words (not effects) get confirmed by the AI. Card and
+            // persona matches send a short snippet; recent-message matches need
+            // none, since the AI reads those messages anyway.
+            if (hit.via !== 'effect' && slot.aiConfirm !== false) {
+                confirm = true;
+                if (hit.note) notes.push({ who: hit.who, text: hit.note });
+            }
+        }
         if (missing.length) {
             met = false;
             reasons.push(`missing ${missing.join(', ')}${!effects && missing.some(x => /[<>=]\s*\d+$/.test(x)) ? ' (SillyStatus not found)' : ''}`);
-        } else reasons.push(`${needs.join(', ')} found`);
+        } else reasons.push(`found: ${found.join(', ')}${confirm ? ' · AI confirms' : ''}`);
     }
-    return { met, conditional: true, why: reasons.join(' · ') };
+    return { met, conditional: true, confirm: met && confirm, notes: met ? notes : [], why: reasons.join(' · ') };
 }
 
 // When a special label isn't available, use the general one for the same
@@ -303,10 +349,19 @@ function buildPick(index, current) {
     const c = ctx();
     const s = settings();
     const slots = usableSlots(index);
+    const notes = new Map(); // de-duplicated card snippets for traits to confirm
     const labels = slots.map(sl => {
-        const special = conditionsOf(sl, index).conditional ? ' [special version: its conditions are true right now, so prefer it over a general label for the same action]' : '';
+        const cond = conditionsOf(sl, index);
+        let special = '';
+        if (cond.confirm) {
+            special = ` [special version: pick it only if this is true for the character involved right now: ${splitList(sl.needsEffect).map(x => x.replace(/\|/g, ' or ')).join(' and ')}. Check the story${notes.size || cond.notes.length ? ' and CHARACTER NOTES' : ''}; backstory, ancestry or a form they are not in right now does not count. Otherwise use the general label.]`;
+            for (const n of cond.notes) if (n.text) notes.set(`${n.who}|${n.text}`, `- ${n.who}: "${n.text}"`);
+        } else if (cond.conditional) {
+            special = ' [special version: its conditions are true right now, so prefer it over a general label for the same action]';
+        }
         return `- ${sl.label}${sl.hint ? `: ${sl.hint}` : ''}${special}`;
     }).join('\n');
+    const noteBlock = notes.size ? `\n\nCHARACTER NOTES (short excerpts, only for checking special versions):\n${[...notes.values()].slice(0, 6).join('\n')}` : '';
     const start = Math.max(0, index - s.contextMessages + 1);
     const lines = [];
     for (let i = start; i <= index; i++) {
@@ -320,11 +375,11 @@ function buildPick(index, current) {
     const system = `You label scenes in an adult roleplay so a matching background image can be shown. You never write story text.
 Pick the label that best matches what is physically happening in the newest message.
 ${noneRule}
-The current label is "${current ?? 'none'}". Keep it unless a different label clearly fits the newest message better, or a [special version] of the same action is now available.
+The current label is "${current ?? 'none'}". Keep it unless a different label clearly fits the newest message better, or a [special version] of the same action is now available, or the current label is a special version whose condition is no longer true.
 Answer with JSON only: {"label": "<one label exactly as written>"}
 
 LABELS:
-${labels}`;
+${labels}${noteBlock}`;
     const user = `RECENT STORY (oldest first, the last message is the one to label):\n\n${lines.join('\n\n')}\n\nAnswer with the JSON now.`;
     return { system, user };
 }
@@ -685,6 +740,7 @@ function slotRow(sl) {
             <input class="text_pole" data-f="hint" placeholder="Hint for the AI (optional)" value="${escapeHtml(sl.hint)}" maxlength="200">
             <input class="text_pole" data-f="onlyWith" placeholder="Only with characters (optional, e.g. Mira, Kit)" value="${escapeHtml(sl.onlyWith ?? '')}" maxlength="200">
             <input class="text_pole" data-f="needsEffect" placeholder="Needs trait or effect (optional, e.g. fox ears|kitsune, Hypnosis>=4)" value="${escapeHtml(sl.needsEffect ?? '')}" maxlength="200">
+            <label class="checkbox_label ssb-confirm"><input type="checkbox" data-f="aiConfirm"${sl.aiConfirm === false ? '' : ' checked'}> AI confirms traits found on cards (backstory and other forms don't count)</label>
             <small class="ssb-cond"></small>
             <div class="ssb-slot-buttons">
                 <label class="menu_button ssb-file">Image<input type="file" accept="image/gif,image/png,image/webp,image/apng,image/avif,image/jpeg" hidden></label>
@@ -867,6 +923,12 @@ function buildSettings() {
             return;
         }
         const f = event.target.dataset.f;
+        if (f === 'aiConfirm') {
+            slot.aiConfirm = event.target.checked;
+            save();
+            renderStatus();
+            return;
+        }
         if (f) {
             slot[f] = event.target.value.trim();
             save();

@@ -173,3 +173,8 @@
     opacity: 0.9;
     color: #9be3b4;
 }
+
+.ssb-confirm {
+    font-size: 0.8em;
+    opacity: 0.85;
+}
