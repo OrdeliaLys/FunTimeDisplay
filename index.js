@@ -6,7 +6,7 @@
 
 import { buildSheet, canCleanUp } from './cleanup.js';
 
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 const MODULE = 'scene_backdrop';
 const SWIPES_KEY = `${MODULE}_swipes`;
 
@@ -201,6 +201,50 @@ function matchItem(item, effects, sources) {
     return null;
 }
 
+// A "Needs" text written as a description rather than a keyword list, like
+// "Any perky animal ears (cat, fox, dog...)". Treated as one condition the AI
+// judges; its notable words are only used to find who might qualify.
+function isDescribed(text) {
+    if (/[()]/.test(text) || /\b(e\.g\.|for example|such as)\b/i.test(text)) return true;
+    return splitList(text).some(item => item.split('|').some(alt => alt.trim().split(/\s+/).length >= 3));
+}
+
+const STOPWORDS = new Set(('a an the and or of for with without to in on at by from as is are be any some all each '
+    + 'like such example eg e g etc kind type sort style version only when while who whose that this these those it its '
+    + 'girl girls boy boys woman women man men person people character characters someone one ones has have having '
+    + 'very really quite more most less little big small perky cute').split(' '));
+
+function keywordsOf(text) {
+    const words = String(text).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(w => w.length >= 3 && !STOPWORDS.has(w));
+    return [...new Set(words)].slice(0, 12);
+}
+
+// Word-start match, so "cat" also finds "catgirl" and "cats" (the AI confirms anyway).
+function wordStartAt(lower, word) {
+    const m = new RegExp(`(^|[^\\p{L}\\p{N}])(${escapeRegex(word)})`, 'u').exec(lower);
+    return m ? m.index + m[1].length : -1;
+}
+
+function describedMatch(text, effects, sources) {
+    const keys = keywordsOf(text);
+    const notes = [];
+    let found = false;
+    for (const e of effects ?? []) {
+        if (e.stage > 0 && keys.some(k => String(e.name ?? '').toLowerCase().includes(k))) found = true;
+    }
+    for (const src of sources) {
+        for (const k of keys) {
+            const at = wordStartAt(src.lower, k);
+            if (at < 0) continue;
+            found = true;
+            if (src.kind !== 'recent' && notes.length < 3 && !notes.some(n => n.who === src.who && n.at !== undefined && Math.abs(n.at - at) < 200)) {
+                notes.push({ who: src.who, text: excerpt(src, at, k.length), at });
+            }
+        }
+    }
+    return { found, keys, notes };
+}
+
 // { met, conditional, confirm, notes, why } for a label at a point in the chat.
 // confirm: the AI should check the trait is true right now (a word match can
 // be backstory, another form, or something that has since changed).
@@ -221,7 +265,17 @@ function conditionsOf(slot, upto) {
             reasons.push(`none of ${people.join(', ')} here`);
         } else reasons.push(`${present.join(', ')} here`);
     }
-    if (needs.length) {
+    if (needs.length && isDescribed(slot.needsEffect)) {
+        const d = describedMatch(slot.needsEffect, activeEffects(), traitSources(upto));
+        if (!d.found) {
+            met = false;
+            reasons.push(`no sign of it (looked for: ${d.keys.join(', ') || 'nothing to look for'})`);
+        } else {
+            confirm = true;
+            notes.push(...d.notes);
+            reasons.push('possible here · AI confirms');
+        }
+    } else if (needs.length) {
         const effects = activeEffects();
         const sources = traitSources(upto);
         const missing = [];
@@ -249,15 +303,30 @@ function conditionsOf(slot, upto) {
     return { met, conditional: true, confirm: met && confirm, notes: met ? notes : [], why: reasons.join(' · ') };
 }
 
+function hasConditions(slot) {
+    return !!(splitList(slot.onlyWith).length || String(slot.needsEffect ?? '').trim());
+}
+
+// The general label a special one belongs to: "Blowjob (ears)" or
+// "Kemono Handjob" -> "Handjob" (the general label's name inside the special one's).
+function parentOf(slot) {
+    if (!hasConditions(slot)) return null;
+    const name = slot.label.trim().toLowerCase();
+    const generals = settings().slots.filter(sl => sl !== slot && sl.label.trim() && !hasConditions(sl));
+    const base = name.replace(/\s*[(\[].*[)\]]\s*$/, '').trim();
+    return generals.find(g => g.label.trim().toLowerCase() === base)
+        ?? generals
+            .filter(g => wordAt(name, g.label.trim().toLowerCase()) >= 0)
+            .sort((a, b) => b.label.length - a.label.length)[0]
+        ?? null;
+}
+
 // When a special label isn't available, use the general one for the same
 // action: "Blowjob (ears)" falls back to "Blowjob".
 function fallbackFor(label, upto) {
-    const base = String(label ?? '').replace(/\s*[(\[].*[)\]]\s*$/, '').trim().toLowerCase();
-    if (!base) return null;
-    const ok = usableSlots(upto);
-    return ok.find(sl => sl.label.trim().toLowerCase() === base)
-        ?? ok.find(sl => !conditionsOf(sl, upto).conditional && sl.label.trim().toLowerCase().startsWith(base))
-        ?? null;
+    const slot = slotByLabel(label);
+    const parent = slot ? parentOf(slot) : null;
+    return parent && parent.path ? parent : null;
 }
 
 function usableSlots(upto) {
@@ -345,23 +414,56 @@ function cleanMessage(mes) {
     return String(mes ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 2500);
 }
 
+// The AI answers two simple questions in one request: which action is
+// happening (from the general labels), and, for special versions whose
+// condition needs judging, whether that condition is true right now. The
+// extension then picks the special version itself when it applies.
+function pickPlan(index) {
+    const usable = usableSlots(index);
+    const specials = [];   // { slot, parent, cond }
+    const offered = [];    // labels the AI chooses from
+    for (const sl of usable) {
+        const parent = parentOf(sl);
+        if (parent && parent.path) specials.push({ slot: sl, parent, cond: conditionsOf(sl, index) });
+        else offered.push(sl);
+    }
+    return { offered, specials, ask: specials.filter(x => x.cond.confirm) };
+}
+
+function conditionText(slot) {
+    const t = String(slot.needsEffect ?? '').trim();
+    const parts = [];
+    if (t) parts.push(isDescribed(t) ? t : splitList(t).map(x => x.replace(/\|/g, ' or ')).join(' and '));
+    if (splitList(slot.onlyWith).length) parts.push(`the character involved is ${splitList(slot.onlyWith).join(' or ')}`);
+    return parts.join('; ');
+}
+
 function buildPick(index, current) {
     const c = ctx();
     const s = settings();
-    const slots = usableSlots(index);
-    const notes = new Map(); // de-duplicated card snippets for traits to confirm
-    const labels = slots.map(sl => {
+    const { offered, ask } = pickPlan(index);
+    const labels = offered.map(sl => {
         const cond = conditionsOf(sl, index);
-        let special = '';
-        if (cond.confirm) {
-            special = ` [special version: pick it only if this is true for the character involved right now: ${splitList(sl.needsEffect).map(x => x.replace(/\|/g, ' or ')).join(' and ')}. Check the story${notes.size || cond.notes.length ? ' and CHARACTER NOTES' : ''}; backstory, ancestry or a form they are not in right now does not count. Otherwise use the general label.]`;
-            for (const n of cond.notes) if (n.text) notes.set(`${n.who}|${n.text}`, `- ${n.who}: "${n.text}"`);
-        } else if (cond.conditional) {
-            special = ' [special version: its conditions are true right now, so prefer it over a general label for the same action]';
-        }
-        return `- ${sl.label}${sl.hint ? `: ${sl.hint}` : ''}${special}`;
+        let tag = '';
+        if (cond.confirm) tag = ` [only if this is true right now: ${conditionText(sl)}]`;
+        return `- ${sl.label}${sl.hint ? `: ${sl.hint}` : ''}${tag}`;
     }).join('\n');
-    const noteBlock = notes.size ? `\n\nCHARACTER NOTES (short excerpts, only for checking special versions):\n${[...notes.values()].slice(0, 6).join('\n')}` : '';
+
+    const notes = new Map();
+    for (const x of ask) for (const n of x.cond.notes) if (n.text) notes.set(`${n.who}|${n.text}`, `- ${n.who}: "${n.text}"`);
+    for (const sl of offered) for (const n of conditionsOf(sl, index).notes) if (n.text) notes.set(`${n.who}|${n.text}`, `- ${n.who}: "${n.text}"`);
+
+    let specialBlock = '';
+    if (ask.length) {
+        specialBlock = `\n\nSPECIAL VERSIONS. Some labels have a special version. For each one below, decide whether its condition is true for the character involved in the current scene right now. Backstory, ancestry, or a form the character is not in right now does not count. Judge from the story${notes.size ? ' and the CHARACTER NOTES' : ''}.\n`
+            + ask.map(x => `- "${x.slot.label}" (special version of ${x.parent.label})${x.slot.hint ? ` — ${x.slot.hint}` : ''}: ${conditionText(x.slot)}`).join('\n');
+    }
+    const noteBlock = notes.size ? `\n\nCHARACTER NOTES (short excerpts):\n${[...notes.values()].slice(0, 6).join('\n')}` : '';
+
+    // A special version counts as its general label for "keep the current one".
+    const curSlot = current ? slotByLabel(current) : null;
+    const curName = curSlot ? (parentOf(curSlot)?.label ?? curSlot.label) : (current ?? 'none');
+
     const start = Math.max(0, index - s.contextMessages + 1);
     const lines = [];
     for (let i = start; i <= index; i++) {
@@ -372,14 +474,17 @@ function buildPick(index, current) {
     const noneRule = s.allowNone
         ? 'If none of them is happening at all, answer "none".'
         : 'Always pick one of them, the closest match, even if the fit is loose. Never answer "none".';
+    const answer = ask.length
+        ? `{"label": "<one label from LABELS exactly as written>", "special": {${ask.map(x => `"${x.slot.label}": true or false`).join(', ')}}}`
+        : '{"label": "<one label from LABELS exactly as written>"}';
     const system = `You label scenes in an adult roleplay so a matching background image can be shown. You never write story text.
 Pick the label that best matches what is physically happening in the newest message.
 ${noneRule}
-The current label is "${current ?? 'none'}". Keep it unless a different label clearly fits the newest message better, or a [special version] of the same action is now available, or the current label is a special version whose condition is no longer true.
-Answer with JSON only: {"label": "<one label exactly as written>"}
+The current label is "${curName}". Keep it unless a different label clearly fits the newest message better.
+Answer with JSON only: ${answer}
 
 LABELS:
-${labels}${noteBlock}`;
+${labels}${specialBlock}${noteBlock}`;
     const user = `RECENT STORY (oldest first, the last message is the one to label):\n\n${lines.join('\n\n')}\n\nAnswer with the JSON now.`;
     return { system, user };
 }
@@ -392,20 +497,24 @@ async function askModel({ system, user }) {
     return await c.generateRaw({ systemPrompt: system, prompt: user });
 }
 
-function parseLabel(raw, index) {
+function parseAnswer(raw, index) {
     const t = String(raw ?? '').replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/```(?:json)?/gi, '');
     const a = t.indexOf('{');
     const b = t.lastIndexOf('}');
     if (a >= 0 && b > a) {
         try {
             const parsed = JSON.parse(t.slice(a, b + 1));
-            if (typeof parsed?.label === 'string') return parsed.label.trim();
+            if (typeof parsed?.label === 'string') {
+                const special = {};
+                for (const [k, v] of Object.entries(parsed.special ?? {})) special[k.trim().toLowerCase()] = v === true || v === 'true' || v === 'yes';
+                return { label: parsed.label.trim(), special };
+            }
         } catch { /* fall through */ }
     }
     // Plain answer: look for a known label in the text.
     const lower = t.toLowerCase();
-    const hit = usableSlots(index).sort((a, b) => b.label.length - a.label.length).find(sl => lower.includes(sl.label.trim().toLowerCase()));
-    return hit ? hit.label : null;
+    const hit = usableSlots(index).sort((x, y) => y.label.length - x.label.length).find(sl => lower.includes(sl.label.trim().toLowerCase()));
+    return hit ? { label: hit.label, special: {} } : null;
 }
 
 async function runPick(index, manual = false) {
@@ -425,10 +534,23 @@ async function runPick(index, manual = false) {
         const current = sceneBefore(index);
         const raw = await askModel(buildPick(index, current));
         if (chatKey() !== key || ctx().chat?.[index] !== msg) return;
-        let label = parseLabel(raw, index);
+        const answer = parseAnswer(raw, index);
+        let label = answer?.label ?? null;
         if (label && label.toLowerCase() === 'none') label = s.allowNone ? 'none' : current;
         let slot = label && label !== 'none' ? slotByLabel(label) : null;
         if (slot && !conditionsOf(slot, index).met) slot = fallbackFor(slot.label, index);
+        // Upgrade to a special version of the chosen action when it applies:
+        // automatically if its condition is certain, or when the AI said it's true.
+        if (slot) {
+            const { specials } = pickPlan(index);
+            const general = parentOf(slot) ?? slot;
+            const options = specials.filter(x => x.parent === general);
+            const chosen = options.find(x => !x.cond.confirm)
+                ?? options.find(x => answer?.special?.[x.slot.label.trim().toLowerCase()] === true)
+                ?? null;
+            if (chosen) slot = chosen.slot;
+            else if (slot !== general && conditionsOf(slot, index).confirm && answer?.special?.[slot.label.trim().toLowerCase()] === false) slot = general;
+        }
         const result = slot ? slot.label : (label === 'none' ? 'none' : current);
         await writeScene(index, result ?? null);
         if (manual) toast('info', `Scene: ${result ?? 'none'}`);
@@ -739,7 +861,7 @@ function slotRow(sl) {
             <input class="text_pole" data-f="label" placeholder="Label" value="${escapeHtml(sl.label)}" maxlength="60">
             <input class="text_pole" data-f="hint" placeholder="Hint for the AI (optional)" value="${escapeHtml(sl.hint)}" maxlength="200">
             <input class="text_pole" data-f="onlyWith" placeholder="Only with characters (optional, e.g. Mira, Kit)" value="${escapeHtml(sl.onlyWith ?? '')}" maxlength="200">
-            <input class="text_pole" data-f="needsEffect" placeholder="Needs trait or effect (optional, e.g. fox ears|kitsune, Hypnosis>=4)" value="${escapeHtml(sl.needsEffect ?? '')}" maxlength="200">
+            <input class="text_pole" data-f="needsEffect" placeholder="Needs trait or effect (optional: keywords like fox ears|kitsune, or describe it)" value="${escapeHtml(sl.needsEffect ?? '')}" maxlength="200">
             <label class="checkbox_label ssb-confirm"><input type="checkbox" data-f="aiConfirm"${sl.aiConfirm === false ? '' : ' checked'}> AI confirms traits found on cards (backstory and other forms don't count)</label>
             <small class="ssb-cond"></small>
             <div class="ssb-slot-buttons">
@@ -830,7 +952,7 @@ function buildSettings() {
                 <hr>
                 <b>Images</b>
                 <small>Each label needs an image. GIFs with a transparent background work best as silhouettes; a GIF with a solid background turns into a solid block.</small>
-                <small>Conditions are optional. A label with conditions is only used while they're true, and is preferred over a general label for the same action. <b>Only with</b>: any of these characters is in the chat or named in recent messages. <b>Needs trait or effect</b>: every listed item is true, either as a trait (named on a character card, its tags, your persona or the recent messages, like "kitsune") or as an active SillyStatus effect (by name or icon; add &gt;=N for a minimum stage). Use | for either-or.</small>
+                <small>Conditions are optional. A label with conditions is only used while they're true, and is preferred over a general label for the same action. <b>Only with</b>: any of these characters is in the chat or named in recent messages. <b>Needs trait or effect</b>: either a plain description (like "any animal ears: cat, fox, dog"), which the AI judges, or a keyword list where every item must be true, either as a trait (named on a character card, its tags, your persona or the recent messages, like "kitsune") or as an active SillyStatus effect (by name or icon; add &gt;=N for a minimum stage). Use | for either-or.</small>
                 <div id="ssb-slots"></div>
                 <div class="ssb-row">
                     <button type="button" class="menu_button" id="ssb-add">Add label</button>
