@@ -108,7 +108,7 @@ function cleanFrame(img) {
 // from each side first. Returns { blob (PNG sheet), meta } or throws.
 // The frames are trimmed to the figure (the empty space around it is
 // dropped), and meta records which sides the figure is cut off at.
-export async function buildSheet(file, onProgress, crop) {
+export async function buildSheet(file, onProgress, crop, { trim = true } = {}) {
     if (!canCleanUp()) throw new Error('this browser cannot decode animation frames');
     const type = mimeFor(file.name, file.type);
     if (globalThis.ImageDecoder.isTypeSupported && !(await globalThis.ImageDecoder.isTypeSupported(type))) {
@@ -168,11 +168,12 @@ export async function buildSheet(file, onProgress, crop) {
         }
         if (maxX < 0) throw new Error('no figure found (is the background transparent?)');
         // A little room around the figure, except on sides where it's cut off.
+        // Without trimming (a framed image that fills the screen), keep it all.
         const pad = Math.round(Math.max(ww, wh) * 0.02);
-        const bx = touchLeft ? 0 : Math.max(0, minX - pad);
-        const by = touchTop ? 0 : Math.max(0, minY - pad);
-        const bx2 = touchRight ? ww - 1 : Math.min(ww - 1, maxX + pad);
-        const by2 = touchBottom ? wh - 1 : Math.min(wh - 1, maxY + pad);
+        const bx = !trim || touchLeft ? 0 : Math.max(0, minX - pad);
+        const by = !trim || touchTop ? 0 : Math.max(0, minY - pad);
+        const bx2 = !trim || touchRight ? ww - 1 : Math.min(ww - 1, maxX + pad);
+        const by2 = !trim || touchBottom ? wh - 1 : Math.min(wh - 1, maxY + pad);
         let fw = bx2 - bx + 1;
         let fh = by2 - by + 1;
 

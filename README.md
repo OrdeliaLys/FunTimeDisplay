@@ -26,7 +26,7 @@ As silhouettes, images need a transparent background: a GIF with a solid backgro
 
 New images are cleaned up when you upload them: every frame is turned into a crisp solid shape, small holes left by background-removal tools are filled, and stray specks are removed. The frames are stored as one sheet the extension plays itself. Images uploaded before this existed can be cleaned with the **Clean up** button.
 
-When you upload an image, a **crop screen** opens with a slider for each side, so you can cut away anything you don't want; **No crop** keeps the whole picture. The **Crop** button redoes it later. After cleaning, empty space around the figure is trimmed automatically.
+When you upload an image, a **framing screen** opens with a dashed frame in the exact shape of your chat area. Drag it to move it and zoom with the slider; **Fill screen with this** makes what's inside the frame fill the whole chat area, edge to edge. **Show whole figure** keeps the whole figure instead, fitted inside the screen with the empty space around it trimmed. The **Frame** button changes it later.
 
 Figures always fit inside the chat area (**Size** scales them down from there). With **Position: Automatic**, a figure that's cut off at an edge of its image is pinned to that side of the screen, and cut sides that can't reach the screen edge fade out softly instead of ending in a hard line.
 

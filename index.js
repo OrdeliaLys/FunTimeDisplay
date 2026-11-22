@@ -6,7 +6,7 @@
 
 import { buildSheet, canCleanUp } from './cleanup.js';
 
-const VERSION = '1.9.1';
+const VERSION = '1.10.0';
 const MODULE = 'scene_backdrop';
 const SWIPES_KEY = `${MODULE}_swipes`;
 
@@ -698,20 +698,26 @@ class Figure {
         const sh = stage.clientHeight;
         const sheet = s.silhouette ? slot.sheet : null;
         const aspect = sheet ? sheet.fw / sheet.fh : (slot.aspect || 0.75);
+        const fill = !!(slot.fill && sheet);
         const k = s.size / 100;
         let h = sh * k;
         let w = h * aspect;
-        if (w > sw * k) {
+        if (fill) {
+            // Framed to the screen's shape: cover the whole chat area.
+            const scale = Math.max(sw / sheet.fw, sh / sheet.fh);
+            w = sheet.fw * scale;
+            h = sheet.fh * scale;
+        } else if (w > sw * k) {
             w = sw * k;
             h = w / aspect;
         }
         w = Math.round(w);
         h = Math.round(h);
-        let anchor = s.anchor;
+        let anchor = fill ? 'center' : s.anchor;
         if (anchor === 'auto') anchor = sheet?.touchBottom ? 'bottom' : sheet?.touchTop ? 'top' : 'center';
         const top = anchor === 'bottom' ? sh - h : anchor === 'top' ? 0 : Math.round((sh - h) / 2);
         let left = Math.round((sw - w) / 2);
-        if (s.anchor === 'auto' && sheet) {
+        if (!fill && s.anchor === 'auto' && sheet) {
             if (sheet.touchLeft && !sheet.touchRight) left = 0;
             else if (sheet.touchRight && !sheet.touchLeft) left = sw - w;
         }
@@ -723,10 +729,10 @@ class Figure {
             // fade out, so neither the silhouette nor its glow ends in a hard line.
             const fade = Math.round(Math.min(w, h) * 0.14);
             const grads = [];
-            if (sheet.touchTop && top > 0) grads.push(`linear-gradient(to bottom, transparent, black ${fade}px)`);
-            if (sheet.touchBottom && top + h < sh) grads.push(`linear-gradient(to top, transparent, black ${fade}px)`);
-            if (sheet.touchLeft && left > 0) grads.push(`linear-gradient(to right, transparent, black ${fade}px)`);
-            if (sheet.touchRight && left + w < sw) grads.push(`linear-gradient(to left, transparent, black ${fade}px)`);
+            if (fill) { /* edges sit on the screen edges: nothing to fade */ } else if (sheet.touchTop && top > 0) grads.push(`linear-gradient(to bottom, transparent, black ${fade}px)`);
+            if (!fill && sheet.touchBottom && top + h < sh) grads.push(`linear-gradient(to top, transparent, black ${fade}px)`);
+            if (!fill && sheet.touchLeft && left > 0) grads.push(`linear-gradient(to right, transparent, black ${fade}px)`);
+            if (!fill && sheet.touchRight && left + w < sw) grads.push(`linear-gradient(to left, transparent, black ${fade}px)`);
             this.fades = grads;
             const src = `url("${encodeURI(urlOf(sheet.path))}")`;
             setMask(this.el, [src, ...grads].join(', '));
@@ -887,7 +893,7 @@ async function cleanSlot(slot, file) {
     const status = document.querySelector(`.ssb-slot[data-slot="${slot.id}"] .ssb-progress`);
     const { blob, meta } = await buildSheet(file, (k, n) => {
         if (status) status.textContent = `Cleaning up… ${Math.round((k / n) * 100)}%`;
-    }, slot.crop);
+    }, slot.crop, { trim: !slot.fill });
     const path = await putFile(`scene_${slot.id}_sheet_${Date.now()}.png`, blob);
     const old = slot.sheet?.path;
     slot.sheet = { path, ...meta };
@@ -911,9 +917,9 @@ async function uploadImage(slot, file) {
     dropFile(old);
     dropFile(oldSheet);
     if (settings().cleanup && canCleanUp()) {
-        // Offer a crop first; skipping it keeps the whole picture.
-        const crop = await cropDialog(urlOf(path), slot.crop ?? null, true);
-        slot.crop = crop ?? undefined;
+        // Offer framing first; skipping it keeps the whole figure, fitted.
+        const choice = await frameDialog(urlOf(path), slot, true);
+        applyFrameChoice(slot, choice);
         save();
         try {
             await cleanSlot(slot, file);
@@ -933,31 +939,59 @@ async function recleanSlot(slot) {
     await cleanSlot(slot, file);
 }
 
-// ---------- crop screen ----------
-// Four sliders (one per side) over a preview of the image; easier on a phone
-// than dragging corners. Resolves with { l, t, r, b } fractions, or null for
-// "no crop", or undefined when cancelled.
-function cropDialog(url, start, fromUpload) {
+// ---------- framing screen ----------
+// A frame with the exact shape of the chat area, laid over the image. Drag it
+// to move it and use the slider to zoom; what's inside fills the whole chat
+// area. "Show whole figure" keeps the fitted look instead.
+// Resolves { mode: 'fill', crop, frame } | { mode: 'fit' } | undefined (cancel).
+
+function stageAspect() {
+    const chatEl = document.getElementById('chat');
+    let w = chatEl?.clientWidth || innerWidth;
+    let h = chatEl?.clientHeight || innerHeight;
+    // If the chat area measures oddly small, use the screen's shape instead.
+    if (h < innerHeight * 0.3 || w < innerWidth * 0.3) {
+        w = innerWidth;
+        h = innerHeight;
+    }
+    return Math.max(0.2, Math.min(5, w / Math.max(1, h)));
+}
+
+function applyFrameChoice(slot, choice) {
+    if (!choice) return;
+    if (choice.mode === 'fill') {
+        slot.fill = true;
+        slot.crop = choice.crop;
+        slot.frame = choice.frame;
+    } else {
+        slot.fill = false;
+        slot.crop = undefined;
+        slot.frame = undefined;
+    }
+}
+
+function frameDialog(url, slot, fromUpload) {
     return new Promise((resolve) => {
-        const c = { l: 0, t: 0, r: 0, b: 0, ...(start ?? {}) };
+        const aspect = stageAspect();
+        const f = { z: 1, cx: 0.5, cy: 0.5, ...(slot.frame ?? {}) };
         const box = document.createElement('div');
         box.id = 'ssb-crop';
         box.innerHTML = `
             <div class="ssb-crop-panel">
-                <b>Crop the image</b>
-                <small>Cut away anything you don't want in the silhouette. Empty space around the figure is trimmed automatically afterwards.</small>
+                <b>Frame the screen</b>
+                <small>The dashed frame has the shape of your chat area. Drag it to move it and zoom with the slider: what's inside fills the whole chat area.</small>
                 <div class="ssb-crop-view">
                     <div class="ssb-crop-frame">
-                        <img alt="">
+                        <img alt="" draggable="false">
                         <div class="ssb-crop-shade"></div>
                         <div class="ssb-crop-box"></div>
                     </div>
                 </div>
-                ${['l', 'r', 't', 'b'].map(k => `<label>${{ l: 'Left', r: 'Right', t: 'Top', b: 'Bottom' }[k]} <span data-v="${k}"></span>
-                    <input type="range" min="0" max="45" step="1" data-c="${k}" value="${Math.round(c[k] * 100)}"></label>`).join('')}
+                <label>Zoom <span data-v="z"></span>
+                    <input type="range" min="20" max="100" step="1" data-c="z"></label>
                 <div class="ssb-row">
-                    <button type="button" class="menu_button" data-x="apply">Apply</button>
-                    <button type="button" class="menu_button" data-x="reset">${fromUpload ? 'No crop' : 'Remove crop'}</button>
+                    <button type="button" class="menu_button" data-x="fill">Fill screen with this</button>
+                    <button type="button" class="menu_button" data-x="fit">Show whole figure</button>
                     ${fromUpload ? '' : '<button type="button" class="menu_button" data-x="cancel">Cancel</button>'}
                 </div>
             </div>`;
@@ -966,38 +1000,73 @@ function cropDialog(url, start, fromUpload) {
         const frame = box.querySelector('.ssb-crop-frame');
         const cropBox = box.querySelector('.ssb-crop-box');
         const shade = box.querySelector('.ssb-crop-shade');
-        img.src = url;
+        const zoom = box.querySelector('[data-c=z]');
+        zoom.value = String(Math.round(f.z * 100));
+        let iw = 1;
+        let ih = 1;
+
+        // The frame in image fractions: width/height of the largest frame of
+        // the chat area's shape that fits the image, times the zoom.
+        const rect = () => {
+            const maxW = Math.min(1, (ih * aspect) / iw);
+            const maxH = Math.min(1, iw / aspect / ih);
+            const w = maxW * f.z;
+            const h = maxH * f.z;
+            f.cx = Math.min(1 - w / 2, Math.max(w / 2, f.cx));
+            f.cy = Math.min(1 - h / 2, Math.max(h / 2, f.cy));
+            return { l: f.cx - w / 2, t: f.cy - h / 2, w, h };
+        };
         const draw = () => {
-            for (const el of box.querySelectorAll('[data-v]')) el.textContent = `${Math.round(c[el.dataset.v] * 100)}%`;
-            const pos = { left: `${c.l * 100}%`, top: `${c.t * 100}%`, right: `${c.r * 100}%`, bottom: `${c.b * 100}%` };
-            Object.assign(cropBox.style, pos);
-            // Darken what will be cut away.
-            shade.style.clipPath = `polygon(0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${c.l * 100}% ${c.t * 100}%, ${c.l * 100}% ${100 - c.b * 100}%, ${100 - c.r * 100}% ${100 - c.b * 100}%, ${100 - c.r * 100}% ${c.t * 100}%, ${c.l * 100}% ${c.t * 100}%)`;
+            const r = rect();
+            box.querySelector('[data-v=z]').textContent = `${Math.round(f.z * 100)}%`;
+            Object.assign(cropBox.style, { left: `${r.l * 100}%`, top: `${r.t * 100}%`, width: `${r.w * 100}%`, height: `${r.h * 100}%` });
+            const L = r.l * 100, T = r.t * 100, R = (r.l + r.w) * 100, B = (r.t + r.h) * 100;
+            shade.style.clipPath = `polygon(0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${L}% ${T}%, ${L}% ${B}%, ${R}% ${B}%, ${R}% ${T}%, ${L}% ${T}%)`;
         };
         img.onload = () => {
-            // Size the preview to the image's shape so the crop box lines up exactly.
+            iw = img.naturalWidth || 1;
+            ih = img.naturalHeight || 1;
             const view = box.querySelector('.ssb-crop-view');
             const maxW = Math.max(100, view.clientWidth - 12);
-            const maxH = Math.max(100, innerHeight * 0.42);
-            const k = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight);
-            Object.assign(frame.style, { width: `${Math.round(img.naturalWidth * k)}px`, height: `${Math.round(img.naturalHeight * k)}px`, aspectRatio: 'auto' });
+            const maxH = Math.max(100, innerHeight * 0.5);
+            const k = Math.min(maxW / iw, maxH / ih);
+            Object.assign(frame.style, { width: `${Math.round(iw * k)}px`, height: `${Math.round(ih * k)}px` });
             draw();
         };
-        for (const input of box.querySelectorAll('[data-c]')) {
-            input.addEventListener('input', () => {
-                c[input.dataset.c] = Number(input.value) / 100;
-                draw();
-            });
-        }
-        draw();
+        img.src = url;
+
+        zoom.addEventListener('input', () => {
+            f.z = Number(zoom.value) / 100;
+            draw();
+        });
+        // Drag anywhere on the preview to move the frame.
+        let drag = null;
+        frame.addEventListener('pointerdown', (event) => {
+            drag = { x: event.clientX, y: event.clientY, cx: f.cx, cy: f.cy };
+            frame.setPointerCapture?.(event.pointerId);
+            event.preventDefault();
+        });
+        frame.addEventListener('pointermove', (event) => {
+            if (!drag) return;
+            const b = frame.getBoundingClientRect();
+            f.cx = drag.cx + (event.clientX - drag.x) / b.width;
+            f.cy = drag.cy + (event.clientY - drag.y) / b.height;
+            draw();
+        });
+        const end = () => { drag = null; };
+        frame.addEventListener('pointerup', end);
+        frame.addEventListener('pointercancel', end);
+
         const done = (value) => {
             box.remove();
             resolve(value);
         };
         box.addEventListener('click', (event) => {
             const x = event.target.closest('[data-x]')?.dataset.x;
-            if (x === 'apply') done(c.l || c.t || c.r || c.b ? { l: c.l, t: c.t, r: c.r, b: c.b } : null);
-            else if (x === 'reset') done(null);
+            if (x === 'fill') {
+                const r = rect();
+                done({ mode: 'fill', crop: { l: r.l, t: r.t, r: 1 - r.l - r.w, b: 1 - r.t - r.h }, frame: { z: f.z, cx: f.cx, cy: f.cy } });
+            } else if (x === 'fit') done({ mode: 'fit' });
             else if (x === 'cancel') done(undefined);
         });
     });
@@ -1031,7 +1100,7 @@ function slotRow(sl) {
                 <label class="menu_button ssb-file">Image<input type="file" accept="image/gif,image/png,image/webp,image/apng,image/avif,image/jpeg" hidden></label>
                 <button type="button" class="menu_button" data-a="preview"${sl.path ? '' : ' disabled'}>Show</button>
                 <button type="button" class="menu_button" data-a="use"${sl.path ? '' : ' disabled'} title="Use this for the current scene">Use now</button>
-                <button type="button" class="menu_button" data-a="crop"${sl.path ? '' : ' disabled'} title="Crop the image">Crop${sl.crop ? ' ✓' : ''}</button>
+                <button type="button" class="menu_button" data-a="crop"${sl.path ? '' : ' disabled'} title="Frame what fills the screen">Frame${sl.fill ? ' ✓' : ''}</button>
                 <button type="button" class="menu_button" data-a="clean"${sl.path ? '' : ' disabled'} title="Fill holes and remove stray pixels">Clean up</button>
                 <button type="button" class="menu_button" data-a="remove">✕</button>
             </div>
@@ -1287,17 +1356,17 @@ function buildSettings() {
             preview = null;
             refresh();
         } else if (a === 'crop') {
-            const crop = await cropDialog(urlOf(slot.path), slot.crop ?? null, false);
-            if (crop === undefined) return; // cancelled
-            slot.crop = crop ?? undefined;
+            const choice = await frameDialog(urlOf(slot.path), slot, false);
+            if (choice === undefined) return; // cancelled
+            applyFrameChoice(slot, choice);
             save();
             btn.disabled = true;
             try {
                 await recleanSlot(slot);
-                toast('success', 'Cropped and cleaned up.');
+                toast('success', slot.fill ? 'Framed: it now fills the screen.' : 'Showing the whole figure.');
             } catch (err) {
-                console.error('[Scene Backdrop] crop failed', err);
-                toast('error', `Crop failed: ${err?.message ?? err}`);
+                console.error('[Scene Backdrop] framing failed', err);
+                toast('error', `Framing failed: ${err?.message ?? err}`);
             }
             renderSlots();
             shownSlot = null;

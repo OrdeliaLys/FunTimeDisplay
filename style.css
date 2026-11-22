@@ -298,6 +298,9 @@
     position: relative;
     width: 200px;
     height: 200px;
+    touch-action: none;
+    cursor: grab;
+    user-select: none;
 }
 
 .ssb-crop-frame img {
@@ -317,5 +320,6 @@
 .ssb-crop-box {
     position: absolute;
     border: 2px dashed #b56cff;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
     pointer-events: none;
 }
